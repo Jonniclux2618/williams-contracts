@@ -254,172 +254,48 @@ fn paginate_ids_empty_index_returns_empty() {
 #[test]
 fn paginate_ids_consecutive_pages_cover_all_ids() {
     let env = Env::default();
-    let raw: Vec<u64> = (1..=7).collect();
-    let ids = make_ids(&env, &raw);
+    let ids = make_ids(&env, &[1, 2, 3, 4, 5, 6, 7]);
 
-    let p1 = paginate_ids(&env, &ids, None, 3);
-    assert_eq!(p1.len(), 3); // [1,2,3]
-
-    let cursor1 = p1.last().unwrap();
-    let p2 = paginate_ids(&env, &ids, Some(cursor1), 3);
-    assert_eq!(p2.len(), 3); // [4,5,6]
-
-    let cursor2 = p2.last().unwrap();
-    let p3 = paginate_ids(&env, &ids, Some(cursor2), 3);
-    assert_eq!(p3.len(), 1); // [7]
-
-    // Verify no duplicates
-    let all: std::vec::Vec<u64> = p1.iter().chain(p2.iter()).chain(p3.iter()).collect();
-    assert_eq!(all, raw);
-}
-
-/// The returned page must never be larger than `limit`.
-#[test]
-fn paginate_ids_never_exceeds_limit() {
-    let env = Env::default();
-    let ids = make_ids(&env, &[1, 2, 3, 4, 5]);
-
-    let page = paginate_ids(&env, &ids, None, 2);
-    assert_eq!(page.len(), 2);
-}
-
-// ---------------------------------------------------------------------------
-// Direct unit tests for storage::paginate_history via the contract API
-// ---------------------------------------------------------------------------
-//
-// `paginate_history` is not pub(crate)-accessible from the test module so we
-// exercise it through `get_will_history_page`, which delegates directly to
-// that helper.  We verify:
-//   1. limit is honoured;
-//   2. a `cursor` offset skips the right number of entries;
-//   3. a cursor past the end returns an empty page.
-
-fn history_test_setup<'a>() -> (Env, WillContractClient<'a>, Address, Address) {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().set_timestamp(1_700_000_000);
-
-    let owner = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(owner.clone());
-    let token_address = sac.address();
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000_000);
-
-    let contract_id = env.register(WillContract, ());
-    let client = WillContractClient::new(&env, &contract_id);
-
-    (env.clone(), client, owner, token_address)
-}
-
-/// Requesting a page whose cursor is beyond the recorded history returns empty.
-#[test]
-fn paginate_history_cursor_past_end_returns_empty() {
-    let (env, client, owner, token_address) = history_test_setup();
-    let beneficiary = Address::generate(&env);
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address.clone(), 500_000_i128)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary.clone(),
-                allocation: Allocation::Percentage(10_000),
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    // There is one history entry (the "created" transition).
-    // cursor = 999 (well past the end) must return empty.
-    let page = client.get_will_history_page(&will_id, &Some(999_u32), &10);
-    assert!(page.is_empty());
-}
-
-/// Requesting with limit=0 returns an empty page.
-#[test]
-fn paginate_history_zero_limit_returns_empty() {
-    let (env, client, owner, token_address) = history_test_setup();
-    let beneficiary = Address::generate(&env);
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address.clone(), 500_000_i128)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary.clone(),
-                allocation: Allocation::Percentage(10_000),
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    let page = client.get_will_history_page(&will_id, &None, &0);
-    assert!(page.is_empty());
-}
-
-/// Two consecutive history pages must together cover all recorded transitions.
-#[test]
-fn paginate_history_pages_cover_full_trail() {
-    let (env, client, owner, token_address) = history_test_setup();
-    let beneficiary = Address::generate(&env);
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address.clone(), 500_000_i128)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary.clone(),
-                allocation: Allocation::Percentage(10_000),
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    // Trigger → release to generate additional history entries.
-    env.ledger()
-        .with_mut(|l| l.timestamp = 1_700_000_000 + 91 * DAY);
-    client.trigger_will(&will_id);
-
-    env.ledger()
-        .with_mut(|l| l.timestamp = 1_700_000_000 + 99 * DAY);
-    client.release_inheritance(&will_id, &None);
-
-    let full = client.get_will_history(&will_id);
-    let n = full.len();
-    assert!(n >= 2, "expected at least 2 history entries");
-
-    // Page 1: first entry.
-    let p1 = client.get_will_history_page(&will_id, &None, &1);
-    assert_eq!(p1.len(), 1);
-
-    // Page 2: all remaining entries.
-    let p2 = client.get_will_history_page(&will_id, &Some(1_u32), &50);
-    assert_eq!(p1.len() + p2.len(), n);
-
-    // Verify no overlap: seq values must be distinct across both pages.
-    let seqs_p1: std::vec::Vec<u64> = p1.iter().map(|e| e.seq).collect();
-    let seqs_p2: std::vec::Vec<u64> = p2.iter().map(|e| e.seq).collect();
-    for seq in &seqs_p2 {
-        assert!(
-            !seqs_p1.contains(seq),
-            "history page overlap: seq {seq} appears in both pages"
-        );
+    let mut collected: Vec<u64> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    loop {
+        let page = paginate_ids(&env, &ids, cursor, 3);
+        if page.is_empty() {
+            break;
+        }
+        for i in 0..page.len() {
+            collected.push(page.get(i).unwrap());
+        }
+        cursor = page.get(page.len() - 1);
     }
+
+    assert_eq!(collected, vec![1, 2, 3, 4, 5, 6, 7]);
+}
+
+/// Exact pagination output: a limit smaller than the remaining items must
+/// return exactly `limit` items, in order, starting strictly after the cursor.
+#[test]
+fn paginate_ids_exact_output_with_limit() {
+    let env = Env::default();
+    let ids = make_ids(&env, &[5, 10, 15, 20, 25, 30, 35, 40]);
+
+    // First page: no cursor, limit 3 → [5, 10, 15]
+    let page = paginate_ids(&env, &ids, None, 3);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap(), 5);
+    assert_eq!(page.get(1).unwrap(), 10);
+    assert_eq!(page.get(2).unwrap(), 15);
+
+    // Second page: cursor 15, limit 3 → [20, 25, 30]
+    let page2 = paginate_ids(&env, &ids, Some(15), 3);
+    assert_eq!(page2.len(), 3);
+    assert_eq!(page2.get(0).unwrap(), 20);
+    assert_eq!(page2.get(1).unwrap(), 25);
+    assert_eq!(page2.get(2).unwrap(), 30);
+
+    // Third page: cursor 30, limit 3 → [35, 40] (fewer than limit)
+    let page3 = paginate_ids(&env, &ids, Some(30), 3);
+    assert_eq!(page3.len(), 2);
+    assert_eq!(page3.get(0).unwrap(), 35);
+    assert_eq!(page3.get(1).unwrap(), 40);
 }

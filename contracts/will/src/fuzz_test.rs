@@ -329,6 +329,86 @@ proptest! {
             prop_assert!(will_id >= 1);
         }
     }
+
+    /// Issue #32: Across arbitrary prime balances, percentage splits, and keeper
+    /// bounties, the sum of distributed beneficiary shares plus the keeper bounty
+    /// must strictly equal the original token balance with zero dust stranded in
+    /// the contract.
+    #[test]
+    fn distribution_with_keeper_bounty_conserves_prime_balances_with_zero_dust(
+        basis_points in valid_basis_point_split_strategy(),
+        balance in prime_or_arbitrary_balance_strategy(),
+        keeper_bounty_bps in 0u32..=100u32,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_700_000_000);
+
+        let owner = Address::generate(&env);
+        let keeper = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(owner.clone());
+        let token_address = sac.address();
+        StellarAssetClient::new(&env, &token_address).mint(&owner, &balance);
+        let token = TokenClient::new(&env, &token_address);
+
+        let contract_id = env.register(WillContract, ());
+        let client = WillContractClient::new(&env, &contract_id);
+        let mut beneficiaries = SorobanVec::new(&env);
+        let mut beneficiary_addresses = Vec::with_capacity(basis_points.len());
+        for share in basis_points {
+            let address = Address::generate(&env);
+            beneficiary_addresses.push(address.clone());
+            beneficiaries.push_back(Beneficiary {
+                address,
+                allocation: Allocation::Percentage(share),
+            });
+        }
+
+        let bounty_opt = if keeper_bounty_bps == 0 {
+            None
+        } else {
+            Some(keeper_bounty_bps)
+        };
+
+        let will_id = client.create_will(
+            &owner,
+            &vec![&env, (token_address, balance)],
+            &beneficiaries,
+            &90,
+            &7,
+            &vec![&env],
+            &0,
+            &bounty_opt,
+            &0,
+        );
+        env.ledger().set_timestamp(1_700_000_000 + 91 * 86_400);
+        client.trigger_will(&will_id);
+        env.ledger().set_timestamp(1_700_000_000 + 99 * 86_400);
+        client.release_inheritance(&will_id, &Some(keeper.clone()));
+
+        let distributed_shares: i128 = beneficiary_addresses
+            .iter()
+            .map(|address| token.balance(address))
+            .sum();
+        let keeper_bounty = token.balance(&keeper);
+
+        prop_assert_eq!(distributed_shares + keeper_bounty, balance);
+        prop_assert_eq!(token.balance(&client.address), 0);
+        prop_assert!(client.get_will(&will_id).balances.is_empty());
+    }
+}
+
+/// Prime and coprime balances that maximize non-zero integer truncation
+/// remainders against `BASIS_POINTS_TOTAL` (10,000 = 2^4 * 5^4) (#32).
+fn prime_or_arbitrary_balance_strategy() -> impl Strategy<Value = i128> {
+    prop_oneof![
+        3 => prop::sample::select(vec![
+            2i128, 3, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79,
+            83, 89, 97, 997, 9_973, 10_007, 99_991, 100_003, 999_983, 1_000_003, 10_000_019,
+            1_000_000_007,
+        ]),
+        2 => 1i128..=1_000_000_000i128,
+    ]
 }
 
 fn mixed_beneficiary_strategy() -> impl Strategy<Value = MixedBeneficiarySpec> {

@@ -61,14 +61,7 @@ type WillSpec = (
 );
 
 fn spec(env: &Env, tokens: SorobanVec<(Address, i128)>) -> WillSpec {
-    (
-        tokens,
-        vec![env, beneficiary(env)],
-        90,
-        7,
-        vec![env],
-        0,
-    )
+    (tokens, vec![env, beneficiary(env)], 90, 7, vec![env], 0)
 }
 
 /// Issue #20: an invalid token in a *secondary* slot of a batch spec aborts

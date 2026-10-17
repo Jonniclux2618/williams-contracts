@@ -66,8 +66,7 @@ pub(crate) fn guardian_vote_expiry_days(will: &Will) -> u32 {
 /// treated as belonging to the same vote window.
 pub(crate) fn live_guardian_vote_weight(env: &Env, will_id: u64, will: &Will, now: u64) -> u32 {
     let now = to_vote_seconds(now);
-    let expiry_days = guardian_vote_expiry_days(will);
-    let _expiry_seconds = (expiry_days as u64).saturating_mul(SECONDS_PER_DAY);
+    let _grace_seconds = will.grace_period_days.saturating_mul(SECONDS_PER_DAY);
     let mut total: u32 = 0;
     for g in will.guardians.iter() {
         if storage::has_guardian_voted(env, will_id, &g.address, now, expiry_days) {

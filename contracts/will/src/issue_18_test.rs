@@ -15,9 +15,7 @@ use soroban_sdk::{
     Address, Bytes, Env, Vec as SorobanVec,
 };
 
-use crate::{
-    storage, Allocation, Beneficiary, WillContract, WillContractClient, PREIMAGE_LENGTH,
-};
+use crate::{storage, Allocation, Beneficiary, WillContract, WillContractClient, PREIMAGE_LENGTH};
 
 const DAY: u64 = 86_400;
 
@@ -73,11 +71,15 @@ impl FailableToken {
         }
         let from_key = TokenDataKey::Balance(from.clone());
         let from_balance: i128 = env.storage().instance().get(&from_key).unwrap_or(0);
-        env.storage().instance().set(&from_key, &(from_balance - amount));
+        env.storage()
+            .instance()
+            .set(&from_key, &(from_balance - amount));
 
         let to_key = TokenDataKey::Balance(to.clone());
         let to_balance: i128 = env.storage().instance().get(&to_key).unwrap_or(0);
-        env.storage().instance().set(&to_key, &(to_balance + amount));
+        env.storage()
+            .instance()
+            .set(&to_key, &(to_balance + amount));
     }
 }
 

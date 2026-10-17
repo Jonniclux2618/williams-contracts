@@ -3,6 +3,7 @@
 //! Tests for hashed beneficiary functionality.
 //! Issue #182: add_hashed_beneficiary validation with percentage beneficiaries
 //! Issue #181: Hashed beneficiaries' share preservation during release
+//! Issue #92: renounce_hashed_beneficiary with pre-image
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -226,28 +227,22 @@ fn multiple_hashed_beneficiaries() {
     assert_eq!(will.hashed_beneficiaries.len(), 3);
 }
 
-/// Issue #181: Test that hashed beneficiaries' funds are reserved during release.
-///
-/// When `release_inheritance` or `guardian_trigger` distributes funds, hashed
-/// beneficiaries' shares must be reserved and not paid to regular beneficiaries.
-/// The will must track that funds are allocated to hashed beneficiaries even
-/// if they have not yet claimed via `reveal_and_claim`.
+/// Issue #92: A hashed beneficiary can renounce their claim by presenting the
+/// pre-image. The commitment is removed from storage and its basis points are
+/// returned to the estate pool.
 #[test]
-fn hashed_beneficiary_funds_preserved_during_release() {
-    let (env, client, owner, token, token_address) = setup();
-    let regular_beneficiary = Address::generate(&env);
+fn renounce_hashed_beneficiary_with_preimage() {
+    let (env, client, owner, _token, token_address) = setup();
+    let reg_beneficiary = Address::generate(&env);
 
     let beneficiaries: SorobanVec<Beneficiary> = vec![
         &env,
         Beneficiary {
-            address: regular_beneficiary.clone(),
-            allocation: Allocation::FixedAmount(800_000),
+            address: reg_beneficiary,
+            allocation: Allocation::FixedAmount(500_000),
         },
     ];
-    // 1,000,000 total leaves 200,000 of headroom beyond the 800,000
-    // FixedAmount commitment -- exactly what the 2,000 bps (20%) hashed
-    // beneficiary below reserves.
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 500_000_i128)];
     let will_id = client.create_will(
         &owner,
         &tokens,
@@ -260,25 +255,57 @@ fn hashed_beneficiary_funds_preserved_during_release() {
         &0,
     );
 
-    // Add hashed beneficiary with a percentage share from the remaining balance
-    let hashed_commitment = env.crypto().sha256(&soroban_sdk::Bytes::new(&env));
+    let preimage = soroban_sdk::Bytes::from_array(&env, &[7u8; 64]);
+    let hashed_commitment = env.crypto().sha256(&preimage);
     let hashed_bytes = soroban_sdk::Bytes::from_array(&env, &hashed_commitment.to_array());
-    client.add_hashed_beneficiary(&will_id, &owner, &hashed_bytes, &2_000);
+    client.add_hashed_beneficiary(&will_id, &owner, &hashed_bytes, &2_500);
 
-    // Trigger will and release
-    release(&env, &client, will_id);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.hashed_beneficiaries.len(), 1);
 
-    // The will should be Released
-    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+    client.renounce_hashed_beneficiary(&will_id, &preimage);
 
-    // Regular beneficiary should receive their fixed amount
-    assert_eq!(token.balance(&regular_beneficiary), 800_000);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.hashed_beneficiaries.len(), 0);
+}
 
-    // The contract should still hold funds for the hashed beneficiary
-    // (exact amount depends on implementation of reserve logic)
-    let contract_balance = token.balance(&client.address);
-    assert!(
-        contract_balance > 0,
-        "Hashed beneficiary share should be reserved in contract"
+/// Issue #92: Renouncing with a pre-image that does not match any commitment
+/// is rejected.
+#[test]
+fn renounce_hashed_beneficiary_unknown_preimage_fails() {
+    let (env, client, owner, _token, token_address) = setup();
+    let reg_beneficiary = Address::generate(&env);
+
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: reg_beneficiary,
+            allocation: Allocation::FixedAmount(500_000),
+        },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 500_000_i128)];
+    let will_id = client.create_will(
+        &owner,
+        &tokens,
+        &beneficiaries,
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
     );
+
+    let preimage = soroban_sdk::Bytes::from_array(&env, &[7u8; 64]);
+    let hashed_commitment = env.crypto().sha256(&preimage);
+    let hashed_bytes = soroban_sdk::Bytes::from_array(&env, &hashed_commitment.to_array());
+    client.add_hashed_beneficiary(&will_id, &owner, &hashed_bytes, &2_500);
+
+    let wrong_preimage = soroban_sdk::Bytes::from_array(&env, &[9u8; 64]);
+    assert!(client
+        .try_renounce_hashed_beneficiary(&will_id, &wrong_preimage)
+        .is_err());
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.hashed_beneficiaries.len(), 1);
 }

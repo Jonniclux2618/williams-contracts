@@ -370,3 +370,34 @@ is now invoked across high-frequency state-mutating entrypoints (`check_in`,
 `batch_check_in`, `top_up`, `trigger_will`) and key lifecycle operations
 (`emergency_checkin`, `release_inheritance`). Active wills now keep the parent
 contract instance alive without requiring external restoration.
+
+## Proportional rounding and dust remainder semantics (issue #32)
+
+During `distribute` (invoked by `release_inheritance` and quorum-reaching
+`guardian_trigger`), each token's distributable balance is split among
+`Allocation::Percentage` beneficiaries using integer division that truncates
+toward zero (`floor(remaining * basis_points / 10_000)` via `proportional_share`).
+For `N` percentage beneficiaries, truncation across the first `N - 1` entries
+leaves at most `N - 1` stroops of rounding dust per token.
+
+### Deterministic final-beneficiary remainder convention
+
+The final `Allocation::Percentage` beneficiary in `will.beneficiaries`
+(`percentage_index == percentage_count`) deterministically absorbs the remaining
+`percentage_remaining` balance (their proportional share plus the integer
+truncation remainder) for every token held by the will:
+
+1. **Zero dust stranded & strict balance conservation:** For every token,
+   `keeper_bounty + sum(distributed_shares) + owner_refund + hashed_reserve == original_token_balance`
+   holds strictly; any discrepancy panics with `WillError::DistributionMismatch`.
+2. **Zero extra CPU or host-call overhead:** Rotating the remainder recipient
+   per token (e.g. by hashing the token address or sorting recipients) would add
+   per-token XDR serialization and SHA-256 host calls inside the hot
+   `release_inheritance` loop for a difference bounded by `MAX_BENEFICIARIES - 1`
+   (at most 9 stroops, or `0.0000009` XLM/USDC on a 7-decimal SEP-41 asset).
+3. **Predictable client & SDK modeling:** Off-chain SDKs, dApp previews, and
+   indexers can compute exact per-beneficiary payouts deterministically from the
+   stored `will.beneficiaries` ordering without simulating host-level address
+   hashing. Callers who wish to designate which beneficiary receives the
+   sub-stroop rounding surplus can place that beneficiary last in the
+   `Allocation::Percentage` list.

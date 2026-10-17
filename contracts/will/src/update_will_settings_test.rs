@@ -520,4 +520,3 @@ fn test_update_periods_emits_valid_future_deadline_event() {
     }
     assert!(found, "periodu event must be emitted");
 }
-

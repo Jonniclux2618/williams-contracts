@@ -256,4 +256,10 @@ pub enum WillError {
     /// recorded failed-payout recipient nor the will's owner. Only those two
     /// parties may move a stalled payout to a recovery address (#19).
     NotAuthorized = 57,
+    /// `archive_will` was called on a `Released` will that still has one or
+    /// more hashed beneficiaries whose shares have not been claimed via
+    /// `reveal_and_claim`. Archiving the will would destroy the persistent
+    /// will entry that `reveal_and_claim` uses to verify the commitment,
+    /// permanently trapping those reserved funds in the contract (#1).
+    UnclaimedHashedBeneficiary = 58,
 }

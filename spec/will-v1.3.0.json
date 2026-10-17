@@ -1,0 +1,804 @@
+{
+  "$schema": "./will-spec.schema.json",
+  "contract": "will",
+  "crate_version": "1.3.0",
+  "generated_by": "scripts/export-spec.sh (stellar contract bindings json)",
+  "functions": [
+    {
+      "name": "create_will",
+      "inputs": [
+        "owner: Address",
+        "tokens: Vec<(Address, i128)>",
+        "beneficiaries: Vec<Beneficiary>",
+        "checkin_period_days: u64",
+        "grace_period_days: u64",
+        "guardians: Vec<Address>",
+        "guardian_threshold: u32",
+        "keeper_bounty_bps: Option<u32>",
+        "confirmation_delay_seconds: u64"
+      ],
+      "output": "u64"
+    },
+    {
+      "name": "confirm_will",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "refund_unconfirmed_will",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "check_in",
+      "inputs": [
+        "will_id: u64",
+        "caller: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "set_delegate",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "delegate: Option<Address>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "set_keeper_bounty_token",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "token: Option<Address>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "batch_check_in",
+      "inputs": [
+        "will_ids: Vec<u64>",
+        "owner: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "trigger_will",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "emergency_checkin",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "release_inheritance",
+      "inputs": [
+        "will_id: u64",
+        "caller: Option<Address>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "retry_failed_payout",
+      "inputs": [
+        "will_id: u64",
+        "token: Address",
+        "recipient: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "redirect_failed_payout",
+      "inputs": [
+        "will_id: u64",
+        "token: Address",
+        "old_recipient: Address",
+        "new_recipient: Address",
+        "caller: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "cancel_will",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "close_will",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "update_beneficiaries",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "beneficiaries: Vec<Beneficiary>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "renounce_beneficiary",
+      "inputs": [
+        "will_id: u64",
+        "beneficiary: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "update_guardians",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "guardians: Vec<Address>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "update_guardians_weighted",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "guardians: Vec<GuardianSpec>",
+        "guardian_threshold: Option<u32>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "update_periods",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "checkin_period_days: Option<u64>",
+        "grace_period_days: Option<u64>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "update_will_settings",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "beneficiaries: Option<Vec<Beneficiary>>",
+        "guardians: Option<Vec<Address>>",
+        "checkin_period_days: Option<u64>",
+        "grace_period_days: Option<u64>"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "top_up",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "token: Address",
+        "amount: i128"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "get_contract_version",
+      "inputs": [],
+      "output": "u32"
+    },
+    {
+      "name": "get_will",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "Will"
+    },
+    {
+      "name": "get_will_status",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "WillStatus"
+    },
+    {
+      "name": "get_time_until_deadline",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "Option<i64>"
+    },
+    {
+      "name": "get_guardian_vote_status",
+      "inputs": [
+        "will_id: u64",
+        "guardian: Address"
+      ],
+      "output": "Option<GuardianVoteRecord>"
+    },
+    {
+      "name": "get_guardian_votes",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "Vec<(Address, GuardianVoteRecord)>"
+    },
+    {
+      "name": "get_protocol_stats",
+      "inputs": [],
+      "output": "ProtocolStats"
+    },
+    {
+      "name": "audit_protocol_stats",
+      "inputs": [],
+      "output": "ProtocolStatsAudit"
+    },
+    {
+      "name": "repair_protocol_stats",
+      "inputs": [],
+      "output": "ProtocolStats"
+    },
+    {
+      "name": "recompute_protocol_stats_chunk",
+      "inputs": [
+        "start_id: u64",
+        "batch_size: u32"
+      ],
+      "output": "(ProtocolStats, u64, bool)"
+    },
+    {
+      "name": "get_triggered_wills",
+      "inputs": [
+        "cursor: Option<u64>",
+        "limit: u32"
+      ],
+      "output": "Vec<u64>"
+    },
+    {
+      "name": "get_wills_by_owner",
+      "inputs": [
+        "owner: Address",
+        "cursor: Option<u64>",
+        "limit: u32"
+      ],
+      "output": "Vec<Will>"
+    },
+    {
+      "name": "get_owner_stats",
+      "inputs": [
+        "owner: Address"
+      ],
+      "output": "OwnerStats"
+    },
+    {
+      "name": "get_wills_by_owner_and_status",
+      "inputs": [
+        "owner: Address",
+        "status: WillStatus",
+        "cursor: Option<u64>",
+        "limit: u32"
+      ],
+      "output": "Vec<Will>"
+    },
+    {
+      "name": "get_owner_status_page",
+      "inputs": [
+        "owner: Address",
+        "status: WillStatus",
+        "cursor: Option<u64>",
+        "limit: u32"
+      ],
+      "output": "WillPage"
+    },
+    {
+      "name": "get_wills_by_beneficiary",
+      "inputs": [
+        "beneficiary: Address",
+        "cursor: Option<u64>",
+        "limit: u32"
+      ],
+      "output": "Vec<Will>"
+    },
+    {
+      "name": "get_wills",
+      "inputs": [
+        "ids: Vec<u64>"
+      ],
+      "output": "Vec<Will>"
+    },
+    {
+      "name": "guardian_trigger",
+      "inputs": [
+        "will_id: u64",
+        "guardian: Address",
+        "reason: GuardianVoteReason"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "guardian_cancel_trigger",
+      "inputs": [
+        "will_id: u64",
+        "guardian: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "accept_guardian_role",
+      "inputs": [
+        "will_id: u64",
+        "guardian: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "reject_guardian_role",
+      "inputs": [
+        "will_id: u64",
+        "guardian: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "reset_guardian_consent",
+      "inputs": [
+        "will_id: u64",
+        "guardian: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "clone_will",
+      "inputs": [
+        "source_will_id: u64",
+        "owner: Address",
+        "tokens: Vec<(Address, i128)>"
+      ],
+      "output": "u64"
+    },
+    {
+      "name": "batch_create_wills",
+      "inputs": [
+        "owner: Address",
+        "will_specs: Vec<(Vec<(Address, i128)>, Vec<Beneficiary>, u64, u64, Vec<Address>, u32,)>"
+      ],
+      "output": "Vec<u64>"
+    },
+    {
+      "name": "migrate_will",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "merge_wills",
+      "inputs": [
+        "owner: Address",
+        "will_id_a: u64",
+        "will_id_b: u64"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "get_will_history",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "Vec<WillStatusTransition>"
+    },
+    {
+      "name": "get_will_history_page",
+      "inputs": [
+        "will_id: u64",
+        "cursor: Option<u32>",
+        "limit: u32"
+      ],
+      "output": "Vec<WillStatusTransition>"
+    },
+    {
+      "name": "archive_will",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "get_archived_will",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "Will"
+    },
+    {
+      "name": "extend_archived_will_ttl",
+      "inputs": [
+        "will_id: u64"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "split_will",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "beneficiaries_to_split: Vec<Beneficiary>",
+        "tokens: Vec<(Address, i128)>"
+      ],
+      "output": "u64"
+    },
+    {
+      "name": "add_hashed_beneficiary",
+      "inputs": [
+        "will_id: u64",
+        "owner: Address",
+        "commitment: Bytes",
+        "percentage: u32"
+      ],
+      "output": "()"
+    },
+    {
+      "name": "reveal_and_claim",
+      "inputs": [
+        "will_id: u64",
+        "claimant: Address",
+        "preimage: Bytes"
+      ],
+      "output": "()"
+    }
+  ],
+  "types": {
+    "Allocation": [
+      "Percentage(u32)",
+      "FixedAmount(i128)"
+    ],
+    "Beneficiary": [
+      "address: Address",
+      "allocation: Allocation"
+    ],
+    "GuardianConsent": [
+      "Pending",
+      "Accepted",
+      "Rejected"
+    ],
+    "GuardianSpec": [
+      "address: Address",
+      "weight: u32"
+    ],
+    "Guardian": [
+      "address: Address",
+      "weight: u32",
+      "consent: GuardianConsent"
+    ],
+    "HashedBeneficiary": [
+      "commitment: Bytes",
+      "percentage: u32",
+      "claimed: bool"
+    ],
+    "WillStatus": [
+      "PendingConfirmation",
+      "Active",
+      "Triggered",
+      "Released",
+      "Cancelled",
+      "Settled"
+    ],
+    "TokenLockedBalance": [
+      "token: Address",
+      "total_locked: i128"
+    ],
+    "ProtocolStats": [
+      "active_will_count: u64",
+      "total_locked_by_token: Vec<TokenLockedBalance>"
+    ],
+    "ProtocolStatsAudit": [
+      "stored: ProtocolStats",
+      "computed: ProtocolStats",
+      "consistent: bool"
+    ],
+    "OwnerStats": [
+      "total_wills: u32",
+      "active_wills: u32",
+      "total_locked_by_token: Vec<TokenLockedBalance>"
+    ],
+    "ClaimableShare": [
+      "total: i128",
+      "claimed: i128"
+    ],
+    "Will": [
+      "id: u64",
+      "owner: Address",
+      "balances: Map<Address, i128>",
+      "token: Address",
+      "is_native: bool",
+      "balance: i128",
+      "beneficiaries: Vec<Beneficiary>",
+      "hashed_beneficiaries: Vec<HashedBeneficiary>",
+      "checkin_period_days: u64",
+      "grace_period_days: u64",
+      "last_checkin: u64",
+      "trigger_time: Option<u64>",
+      "confirmation_deadline: Option<u64>",
+      "status: WillStatus",
+      "guardians: Vec<Guardian>",
+      "guardian_vote_weight: u32",
+      "guardian_votes: u32",
+      "guardian_cancel_vote_weight: u32",
+      "guardian_cancel_votes: u32",
+      "guardian_threshold: u32",
+      "guardian_list_updated_at: u64",
+      "schema_version: u32",
+      "keeper_bounty_bps: u32",
+      "keeper_bounty_token: Option<Address>",
+      "delegate: Option<Address>"
+    ],
+    "WillPage": [
+      "wills: Vec<Will>",
+      "total_count: u32",
+      "next_cursor: Option<u64>"
+    ],
+    "GuardianVoteReason": [
+      "Deceased",
+      "Incapacitated",
+      "Unreachable",
+      "Other"
+    ],
+    "WillStatusTransition": [
+      "will_id: u64",
+      "from_status: WillStatus",
+      "to_status: WillStatus",
+      "timestamp: u64",
+      "actor: Address",
+      "action: Symbol",
+      "seq: u64"
+    ],
+    "GuardianVoteRecord": [
+      "timestamp: u64",
+      "reason: GuardianVoteReason"
+    ]
+  },
+  "errors": [
+    {
+      "code": 1,
+      "name": "WillNotFound"
+    },
+    {
+      "code": 2,
+      "name": "NotOwner"
+    },
+    {
+      "code": 3,
+      "name": "WillNotActive"
+    },
+    {
+      "code": 4,
+      "name": "WillNotTriggered"
+    },
+    {
+      "code": 5,
+      "name": "GracePeriodNotExpired"
+    },
+    {
+      "code": 6,
+      "name": "GracePeriodExpired"
+    },
+    {
+      "code": 7,
+      "name": "InvalidPercentages"
+    },
+    {
+      "code": 8,
+      "name": "AlreadyVoted"
+    },
+    {
+      "code": 9,
+      "name": "NotGuardian"
+    },
+    {
+      "code": 10,
+      "name": "CheckinNotDue"
+    },
+    {
+      "code": 11,
+      "name": "ZeroAmount"
+    },
+    {
+      "code": 12,
+      "name": "TooManyBeneficiaries"
+    },
+    {
+      "code": 13,
+      "name": "WillNotSettled"
+    },
+    {
+      "code": 14,
+      "name": "WillNotBothActive"
+    },
+    {
+      "code": 15,
+      "name": "SameWillId"
+    },
+    {
+      "code": 16,
+      "name": "MergeWouldExceedLimits"
+    },
+    {
+      "code": 17,
+      "name": "OwnerCannotBeGuardian"
+    },
+    {
+      "code": 18,
+      "name": "BeneficiaryNotFound"
+    },
+    {
+      "code": 19,
+      "name": "KeeperBountyExceedsMax"
+    },
+    {
+      "code": 20,
+      "name": "InvalidGuardianThreshold"
+    },
+    {
+      "code": 21,
+      "name": "FixedAmountExceedsBalance"
+    },
+    {
+      "code": 23,
+      "name": "WillNotReleased"
+    },
+    {
+      "code": 24,
+      "name": "NotSameOwner"
+    },
+    {
+      "code": 25,
+      "name": "InvalidPeriod"
+    },
+    {
+      "code": 26,
+      "name": "DuplicateGuardian"
+    },
+    {
+      "code": 27,
+      "name": "GuardianCooldownActive"
+    },
+    {
+      "code": 28,
+      "name": "InvalidToken"
+    },
+    {
+      "code": 29,
+      "name": "DuplicateBeneficiary"
+    },
+    {
+      "code": 30,
+      "name": "WillNotConfirmed"
+    },
+    {
+      "code": 31,
+      "name": "ConfirmationWindowExpired"
+    },
+    {
+      "code": 32,
+      "name": "TooManyIds"
+    },
+    {
+      "code": 33,
+      "name": "InsufficientBalance"
+    },
+    {
+      "code": 34,
+      "name": "InvalidSplit"
+    },
+    {
+      "code": 35,
+      "name": "InvalidPreimage"
+    },
+    {
+      "code": 36,
+      "name": "AlreadyClaimed"
+    },
+    {
+      "code": 37,
+      "name": "TooManyWills"
+    },
+    {
+      "code": 38,
+      "name": "GuardianNotConsented"
+    },
+    {
+      "code": 39,
+      "name": "DistributionMismatch"
+    },
+    {
+      "code": 40,
+      "name": "DuplicateToken"
+    },
+    {
+      "code": 41,
+      "name": "BatchTooLarge"
+    },
+    {
+      "code": 42,
+      "name": "InvalidTokenCount"
+    },
+    {
+      "code": 43,
+      "name": "InvalidPreimageLength"
+    },
+    {
+      "code": 44,
+      "name": "InvalidCommitmentLength"
+    },
+    {
+      "code": 45,
+      "name": "DuplicateCommitment"
+    },
+    {
+      "code": 46,
+      "name": "PreimageAddressMismatch"
+    },
+    {
+      "code": 47,
+      "name": "MergeWithHashedBeneficiaries"
+    },
+    {
+      "code": 48,
+      "name": "DuplicateWillId"
+    },
+    {
+      "code": 49,
+      "name": "InvalidConsentTransition"
+    },
+    {
+      "code": 50,
+      "name": "NoFailedPayout"
+    },
+    {
+      "code": 51,
+      "name": "UnsupportedSchemaVersion"
+    },
+    {
+      "code": 52,
+      "name": "PrimaryTokenMismatch"
+    },
+    {
+      "code": 53,
+      "name": "GuardianCancelInProgress"
+    },
+    {
+      "code": 54,
+      "name": "ConfirmationWindowNotExpired"
+    },
+    {
+      "code": 55,
+      "name": "ArithmeticOverflow"
+    },
+    {
+      "code": 56,
+      "name": "InvalidBountyToken"
+    },
+    {
+      "code": 57,
+      "name": "NotAuthorized"
+    },
+    {
+      "code": 58,
+      "name": "InvalidDelegate"
+    }
+  ]
+}
