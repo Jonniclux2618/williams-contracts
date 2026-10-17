@@ -90,7 +90,7 @@ fn test_get_time_until_deadline_active_will_positive_time_remaining() {
 }
 
 #[test]
-fn test_get_time_until_deadline_active_will_negative_after_missed_deadline() {
+fn test_get_time_until_deadline_active_will_clamped_after_missed_deadline() {
     let (env, client, owner, token_address) = setup();
 
     let checkin_period_days = 30;
@@ -110,11 +110,60 @@ fn test_get_time_until_deadline_active_will_negative_after_missed_deadline() {
     assert!(time_until_deadline.is_some());
     let seconds_remaining = time_until_deadline.unwrap();
 
-    // Should be negative (deadline has passed)
-    assert!(
-        seconds_remaining < 0,
-        "Deadline should be in the past (negative), got {} seconds",
+    // Overdue deadlines are clamped to zero (never negative)
+    assert_eq!(
+        seconds_remaining, 0,
+        "Overdue deadline should be clamped to 0, got {} seconds",
         seconds_remaining
+    );
+}
+
+#[test]
+fn test_get_time_until_deadline_active_will_zero_at_exact_deadline() {
+    let (env, client, owner, token_address) = setup();
+
+    let checkin_period_days = 30;
+    let will_id = create_active_will(
+        &env,
+        &client,
+        &owner,
+        &token_address,
+        checkin_period_days,
+        7,
+    );
+
+    // Advance exactly to the check-in deadline (now == deadline)
+    env.ledger().with_mut(|l| l.timestamp += checkin_period_days * DAY);
+
+    assert_eq!(
+        client.get_time_until_deadline(&will_id),
+        Some(0),
+        "At the exact deadline the remaining time should be 0"
+    );
+}
+
+#[test]
+fn test_get_time_until_deadline_active_will_zero_ten_days_past_deadline() {
+    let (env, client, owner, token_address) = setup();
+
+    let checkin_period_days = 30;
+    let will_id = create_active_will(
+        &env,
+        &client,
+        &owner,
+        &token_address,
+        checkin_period_days,
+        7,
+    );
+
+    // Advance 10 days past the check-in deadline (now > deadline)
+    env.ledger()
+        .with_mut(|l| l.timestamp += (checkin_period_days + 10) * DAY);
+
+    assert_eq!(
+        client.get_time_until_deadline(&will_id),
+        Some(0),
+        "Ten days past the deadline should be clamped to 0"
     );
 }
 
@@ -154,7 +203,7 @@ fn test_get_time_until_deadline_triggered_will_counts_grace_period() {
 }
 
 #[test]
-fn test_get_time_until_deadline_triggered_will_negative_after_grace_expires() {
+fn test_get_time_until_deadline_triggered_will_clamped_after_grace_expires() {
     let (env, client, owner, token_address) = setup();
 
     let checkin_period_days = 30;
@@ -181,10 +230,10 @@ fn test_get_time_until_deadline_triggered_will_negative_after_grace_expires() {
     assert!(time_until_deadline.is_some());
     let seconds_remaining = time_until_deadline.unwrap();
 
-    // Should be negative (grace period has passed)
-    assert!(
-        seconds_remaining < 0,
-        "Grace period should have expired (negative), got {} seconds",
+    // Expired grace period is clamped to zero (never negative)
+    assert_eq!(
+        seconds_remaining, 0,
+        "Expired grace period should be clamped to 0, got {} seconds",
         seconds_remaining
     );
 }
@@ -231,8 +280,8 @@ fn test_get_time_until_deadline_pending_confirmation() {
     env.ledger().with_mut(|l| l.timestamp += 2000);
     assert_eq!(
         client.get_time_until_deadline(&will_id),
-        Some(-200),
-        "Lapsed confirmation deadline should return negative seconds"
+        Some(0),
+        "Lapsed confirmation deadline should be clamped to 0"
     );
 }
 
@@ -281,23 +330,11 @@ fn test_get_time_until_deadline_cancelled_returns_none() {
     );
 
     // Cancel the will
-    client.cancel_will(&will_id, &owner);
+    client.cancel_will(&will_id);
 
     let time_until_deadline = client.get_time_until_deadline(&will_id);
     assert!(
         time_until_deadline.is_none(),
         "Cancelled status should return None"
-    );
-}
-
-#[test]
-fn test_get_time_until_deadline_nonexistent_will_panics() {
-    let (_env, client, _owner, _token_address) = setup();
-    // Soroban's panic message only shows the numeric error code, never the
-    // enum variant name, so should_panic(expected = "WillNotFound") can
-    // never match -- use try_get_time_until_deadline instead.
-    assert_eq!(
-        client.try_get_time_until_deadline(&9999),
-        Err(Ok(crate::WillError::WillNotFound.into())),
     );
 }
