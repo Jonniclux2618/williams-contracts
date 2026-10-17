@@ -428,3 +428,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-98 -->
 - #98: Lack of Batch Guardian Consent Mechanism Multiplies Multi-Party Onboarding Costs
+
+<!-- handsoff-issue-99 -->
+- #99: update_guardians Requires Full List Replacement to Update Single Guardian Threshold
