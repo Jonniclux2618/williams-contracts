@@ -434,3 +434,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-65 -->
 - #65: Fixed-Amount Beneficiaries Cannot Receive Secondary Tokens Deposited in Multi-Token Wills
+
+<!-- handsoff-issue-67 -->
+- #67: update_guardians_weighted Permits Assigning Zero Weight to Guardians
