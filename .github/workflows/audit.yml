@@ -3,6 +3,8 @@ name: Security Audit
 # Runs cargo-audit against the advisory allow-list in audit.toml on every
 # push/PR to main and on a daily schedule, so a newly disclosed advisory in
 # a dependency is caught even without a dependency-bumping PR (issue #270).
+# Also runs cargo-deny (deny.toml) to enforce license policy and ban duplicate
+# dependency versions (issue #122).
 
 on:
   push:
@@ -34,3 +36,25 @@ jobs:
 
       - name: Run cargo audit
         run: cargo audit
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-deny-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: Run cargo deny check
+        run: cargo deny check
