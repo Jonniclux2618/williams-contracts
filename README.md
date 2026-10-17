@@ -431,3 +431,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-99 -->
 - #99: update_guardians Requires Full List Replacement to Update Single Guardian Threshold
+
+<!-- handsoff-issue-100 -->
+- #100: GuardianVoteReason Enum Lacks Extensibility for Custom External Proofs
