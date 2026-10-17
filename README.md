@@ -431,3 +431,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-116 -->
 - #116: Excessive Memory Clone Operations in merge_beneficiaries and merge_guardians
+
+<!-- handsoff-issue-65 -->
+- #65: Fixed-Amount Beneficiaries Cannot Receive Secondary Tokens Deposited in Multi-Token Wills
