@@ -173,3 +173,71 @@ fn non_owner_non_delegate_cannot_check_in() {
         Err(Ok(WillError::NotOwner.into()))
     );
 }
+
+/// Test asserting `set_delegate` rejects setting the will owner as delegate (#31).
+#[test]
+fn set_delegate_rejects_owner_as_delegate() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: beneficiary,
+            allocation: Allocation::Percentage(10_000),
+        },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+
+    let will_id = client.create_will(
+        &owner,
+        &tokens,
+        &beneficiaries,
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    assert_eq!(
+        client.try_set_delegate(&will_id, &owner, &Some(owner.clone())),
+        Err(Ok(WillError::InvalidDelegate.into()))
+    );
+    assert_eq!(client.get_will(&will_id).delegate, None);
+}
+
+/// Test asserting `set_delegate` rejects setting the contract address itself as delegate (#31).
+#[test]
+fn set_delegate_rejects_contract_address_as_delegate() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: beneficiary,
+            allocation: Allocation::Percentage(10_000),
+        },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+
+    let will_id = client.create_will(
+        &owner,
+        &tokens,
+        &beneficiaries,
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    assert_eq!(
+        client.try_set_delegate(&will_id, &owner, &Some(client.address.clone())),
+        Err(Ok(WillError::InvalidDelegate.into()))
+    );
+    assert_eq!(client.get_will(&will_id).delegate, None);
+}

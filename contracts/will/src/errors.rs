@@ -259,4 +259,116 @@ pub enum WillError {
     /// Raised during `release_inheritance` when the computed distribution is
     /// inconsistent with the will's balance for a token.
     DistributionMismatch = 39,
+    /// The same token address was supplied more than once in a `tokens`
+    /// list. `create_will` documents each token address as unique, and a
+    /// duplicated entry would make the legacy `balance` mirror disagree with
+    /// the accumulated `balances` map (#350).
+    DuplicateToken = 40,
+    /// A `batch_check_in` call supplied more will ids than
+    /// `batch_check_in_limit::MAX_BATCH_CHECK_IN` (50).
+    BatchTooLarge = 41,
+    /// The `tokens` list supplied to `create_will`, `clone_will`, `split_will`
+    /// or `batch_create_wills` was empty, or held more than `MAX_TOKENS`
+    /// entries (#390). Also raised by `top_up` when the token being topped up
+    /// is not already in the will's `balances` map and that map already holds
+    /// `MAX_TOKENS` distinct tokens, since each new entry is another storage
+    /// read on every release or refund (#358); topping up a token the will
+    /// already holds stays allowed at the cap.
+    InvalidTokenCount = 42,
+    /// `reveal_and_claim` was called with a pre-image that is not exactly
+    /// `SHA256_DIGEST_LEN` bytes. A shorter or longer pre-image could never
+    /// hash to a stored 32-byte commitment, so it is rejected before the
+    /// digest is computed (#370).
+    InvalidPreimageLength = 43,
+    /// A hashed-beneficiary commitment was not exactly `SHA256_DIGEST_LEN`
+    /// bytes and therefore could never be matched by a pre-image (#371).
+    InvalidCommitmentLength = 44,
+    /// The same commitment hash is already registered on this will, making
+    /// the second slot unreachable by `reveal_and_claim` (#371).
+    DuplicateCommitment = 45,
+    /// `reveal_and_claim` was called with a pre-image whose first 32 bytes are
+    /// not a valid Soroban address, or that decode to an address other than
+    /// `claimant`. The pre-image is public (it sits in the transaction
+    /// arguments, in simulation results, and in the mempool), so without this
+    /// binding any third party who observes it could replay it with their own
+    /// address as `claimant` and take the reserved share before the real
+    /// beneficiary does (#369).
+    PreimageAddressMismatch = 46,
+    /// `merge_wills` was called while either will still carried hashed
+    /// beneficiaries that had not revealed. `merge_beneficiaries` only merges
+    /// *visible* beneficiaries, so the consumed will's commitments and their
+    /// committed percentages would be dropped while its balance moved to the
+    /// survivor — silently stranding those beneficiaries' claim (#380).
+    MergeWithHashedBeneficiaries = 47,
+    /// A `batch_check_in` `will_ids` list named the same will more than once,
+    /// so one will would otherwise be processed — and emit a redundant
+    /// `check_in` event — up to `MAX_BATCH_CHECK_IN` times in a single call,
+    /// making the reported count meaningless (#355).
+    DuplicateWillId = 48,
+    /// `accept_guardian_role` was called by a guardian who had already
+    /// `Rejected` the role. `Rejected` is terminal for a guardian entry: they
+    /// can only be asked again if the owner re-appoints them through
+    /// `update_guardians` / `update_guardians_weighted`, which resets the list
+    /// to `Pending` (#374).
+    InvalidConsentTransition = 49,
+    /// `retry_failed_payout` was called for a `(will_id, token, recipient)`
+    /// tuple with no recorded failed payout — either it was never recorded,
+    /// it was already retried successfully, or the arguments do not match any
+    /// payout `distribute` attempted (#459).
+    NoFailedPayout = 50,
+    /// A stored will could not be decoded as the current `Will` layout or any
+    /// known legacy layout (see `migration.rs`).
+    ///
+    /// #751 — previously also `= 39`, colliding with `DistributionMismatch`:
+    /// a hard compile error (duplicate discriminant), found while fixing
+    /// unrelated issues in this same file and corrected alongside them since
+    /// nothing else in this repo could compile until it was.
+    UnsupportedSchemaVersion = 51,
+    /// Cannot merge: the two wills' primary tokens differ, so summing their
+    /// legacy `balance` fields would be nonsensical.
+    ///
+    /// #751 — previously also `= 39`; see `UnsupportedSchemaVersion` above.
+    PrimaryTokenMismatch = 52,
+    /// `update_guardians`, `update_guardians_weighted` or the guardian branch
+    /// of `update_will_settings` was called while guardian-cancel votes were
+    /// still recorded against the current guardian list. Replacing the list
+    /// would wipe those votes and let a fresh trigger bypass a cancel that was
+    /// accumulating against it, so the update is refused (#488).
+    GuardianCancelInProgress = 53,
+    /// `refund_unconfirmed_will` was called before the confirmation deadline
+    /// plus grace margin had elapsed (#40).
+    ConfirmationWindowNotExpired = 54,
+    /// A timestamp or deadline calculation overflowed `u64`.
+    ///
+    /// `checkin_period_days` and `grace_period_days` are individually bounded
+    /// by `MAX_PERIOD_DAYS` when they are set, but the combination
+    /// `last_checkin + checkin_period_days * SECONDS_PER_DAY` or the
+    /// subsequent `+ grace_period_days * SECONDS_PER_DAY` could still
+    /// overflow in extreme fuzz or adversarial scenarios. All deadline and
+    /// period arithmetic goes through checked helpers that panic with this
+    /// error rather than wrapping silently (#16).
+    ///
+    /// Historically numbered 54; renumbered to 55 because code 54 had already
+    /// been claimed by [`WillError::ConfirmationWindowNotExpired`] by the time
+    /// the variant was restored to the enum (#751-style renumbering).
+    ArithmeticOverflow = 55,
+    /// `set_keeper_bounty_token` was called with a token the will does not
+    /// currently hold. The bounty is carved out of a balance the will holds,
+    /// so naming any other token could never pay from it and would silently
+    /// degrade to no bounty at all (#109).
+    ///
+    /// Historically numbered 54; renumbered to 56 because code 54 had already
+    /// been claimed by [`WillError::ConfirmationWindowNotExpired`] by the time
+    /// the variant was restored to the enum (see [`Self::ArithmeticOverflow`]).
+    InvalidBountyToken = 56,
+    /// `redirect_failed_payout` was called by an address that is neither the
+    /// recorded failed-payout recipient nor the will's owner. Only those two
+    /// parties may move a stalled payout to a recovery address (#19).
+    NotAuthorized = 57,
+    /// `archive_will` was called on a `Released` will that still has one or
+    /// more hashed beneficiaries whose shares have not been claimed via
+    /// `reveal_and_claim`. Archiving the will would destroy the persistent
+    /// will entry that `reveal_and_claim` uses to verify the commitment,
+    /// permanently trapping those reserved funds in the contract (#1).
+    UnclaimedHashedBeneficiary = 58,
 }

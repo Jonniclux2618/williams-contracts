@@ -7,6 +7,9 @@
 //! `release_inheritance` accepted `now >= deadline`, so at
 //! `now == deadline` both succeeded and the outcome depended purely on which
 //! transaction the ledger included first.
+//!
+//! Also covers issue #71: failed payouts for the same `(will_id, token,
+//! recipient)` must accumulate rather than overwrite each other.
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -14,7 +17,9 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
+use crate::{
+    storage, Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus,
+};
 
 const DAY: u64 = 86_400;
 
@@ -188,4 +193,27 @@ fn guardian_cancel_follows_the_same_boundary() {
     client.guardian_cancel_trigger(&will_id, &g1.clone());
     client.guardian_cancel_trigger(&will_id, &g2.clone());
     assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+}
+
+/// Issue #71: two failed payouts for the same `(will_id, token, recipient)`
+/// must accumulate rather than overwrite, so the full owed balance stays
+/// retriable.
+#[test]
+fn failed_payouts_for_same_recipient_accumulate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(WillContract, ());
+    let recipient = Address::generate(&env);
+    let token = Address::generate(&env);
+    let will_id = 7_u64;
+
+    env.as_contract(&contract_id, || {
+        storage::set_failed_payout(&env, will_id, &token, &recipient, 100);
+        storage::set_failed_payout(&env, will_id, &token, &recipient, 250);
+
+        assert_eq!(
+            storage::get_failed_payout(&env, will_id, &token, &recipient),
+            350
+        );
+    });
 }

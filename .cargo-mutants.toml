@@ -1,0 +1,57 @@
+# cargo-mutants configuration for williams-contracts (#79).
+#
+# Run mutation testing with:
+#   just mutants
+# or directly:
+#   cargo mutants --workspace
+#
+# cargo-mutants doc: https://mutants.rs/
+
+# ── Scope ────────────────────────────────────────────────────────────────────
+# Focus mutations on the core contract logic.  Test helpers, migration shims,
+# and profile benchmarks are excluded because:
+#   - test_support / fuzz_harness / profile: not production code; mutating them
+#     would measure test-helper quality, not contract correctness.
+#   - migration: schema-migration paths are exercised by migrate_will_test and
+#     are low-churn; the cost-to-signal ratio of mutating them is low.
+#   - errors / events: these are largely data declarations; operator mutations
+#     (e.g. swapping error codes) produce trivially-caught failures.
+
+exclude_globs = [
+    "contracts/will/src/test_support.rs",
+    "contracts/will/src/fuzz_harness.rs",
+    "contracts/will/src/fuzz_test.rs",
+    "contracts/will/src/profile.rs",
+    "contracts/will/src/migration.rs",
+    "contracts/will/src/events.rs",
+    "contracts/will/src/errors.rs",
+    "fuzz/**",
+]
+
+# ── Mutation operators ────────────────────────────────────────────────────────
+# The default operator set already covers the most valuable classes for a
+# financial smart contract:
+#   - arithmetic: + ↔ -, * ↔ /, etc.   Catches off-by-one in fee/share maths.
+#   - comparison: > ↔ >=, < ↔ <=, etc. Catches boundary bugs in status checks.
+#   - boolean: && ↔ ||, ! elision.      Catches logic inversions.
+#   - return values: replaces returned literals.  Catches missing checks.
+#
+# No additional operator configuration is needed; the defaults are sufficient
+# for the quorum-and-distribution math highlighted in issue #79.
+
+# ── Performance ──────────────────────────────────────────────────────────────
+# Each mutant runs the full `cargo test --workspace` suite, which includes
+# property-based fuzz tests.  Keep the job tractable by running mutants in
+# parallel (one per logical CPU) and setting a per-mutant timeout generous
+# enough for the slowest integration tests.
+
+# Number of parallel jobs (0 = one per logical CPU).
+jobs = 0
+
+# Seconds before a single mutant's test run is killed as "timeout".
+timeout = 120
+
+# ── Output ───────────────────────────────────────────────────────────────────
+# Write a machine-readable summary so CI can surface missed-mutant counts in
+# the job summary without parsing human-readable output.
+output = "mutants.out"

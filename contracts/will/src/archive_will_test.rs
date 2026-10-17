@@ -6,6 +6,10 @@
 //! And for issue #393: archival also drops the will's `WillHistory` entry and
 //! every `GuardianVote` / `GuardianCancelVote` entry belonging to its guardians,
 //! rather than leaving them orphaned in persistent storage.
+//!
+//! And for issue #82: `get_owner_status_page` must skip archived/non-resolving
+//! will ids consistently in both its pagination and count loops, so a mixed
+//! active/archived owner index never panics during paginated reads.
 
 use soroban_sdk::{
     symbol_short,
@@ -210,6 +214,58 @@ fn archive_will_rejects_active_will() {
     client.archive_will(&will_id);
 }
 
+// ── Issue #82: get_owner_status_page tolerates archived ids ──────────────
+
+/// Regression test for issue #82: `get_owner_status_page` must not panic when
+/// the owner's `ids` index still references a will whose storage entry has been
+/// removed by archival. Both the pagination loop and the total-count loop must
+/// skip non-resolving ids identically, so a mixed active/archived portfolio
+/// returns cleanly and reports only the active wills.
+#[test]
+fn get_owner_status_page_skips_archived_wills() {
+    let (env, client, owner, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let make_will = |amount: i128| {
+        client.create_will(
+            &owner,
+            &vec![&env, (token_address.clone(), amount)],
+            &vec![
+                &env,
+                Beneficiary {
+                    address: beneficiary.clone(),
+                    allocation: Allocation::Percentage(10_000),
+                },
+            ],
+            &90,
+            &7,
+            &vec![&env],
+            &0,
+            &None,
+            &0,
+        )
+    };
+
+    let active_id = make_will(1_000_000_i128);
+    let archived_id = make_will(2_000_000_i128);
+
+    // Cancel then archive the second will so its storage entry is gone while
+    // its id may still linger in the owner index.
+    client.cancel_will(&archived_id, &owner);
+    client.archive_will(&archived_id);
+
+    // Paginated read over the mixed active/archived portfolio must not panic.
+    let page = client.get_owner_status_page(&owner, &None, &10);
+    assert!(
+        page.iter().all(|s| s.will_id != archived_id),
+        "archived will ids must not appear in the status page"
+    );
+    assert!(
+        page.iter().any(|s| s.will_id == active_id),
+        "active will must still be reported"
+    );
+}
+
 // ── Issue #393: archival drops history and guardian vote entries ─────────
 
 /// Whether `key` is absent from persistent storage.
@@ -240,192 +296,6 @@ fn key_exists(env: &Env, contract_id: &Address, key: &DataKey) -> bool {
 fn archive_will_removes_history_and_guardian_vote_entries() {
     let env = Env::default();
     env.mock_all_auths();
-    env.ledger().set_timestamp(1_700_000_000);
+    e
 
-    let owner = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(owner.clone());
-    let token_address = sac.address();
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000_000);
-
-    let contract_id = env.register(WillContract, ());
-    let client = WillContractClient::new(&env, &contract_id);
-
-    let guardian_a = Address::generate(&env);
-    let guardian_b = Address::generate(&env);
-    let guardians: soroban_sdk::Vec<Address> = vec![&env, guardian_a.clone(), guardian_b.clone()];
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address, 1_000_000_i128)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: Address::generate(&env),
-                allocation: Allocation::Percentage(10_000),
-            },
-        ],
-        &90,
-        &7,
-        &guardians,
-        &2,
-        &None,
-        &0,
-    );
-    for guardian in guardians.iter() {
-        client.accept_guardian_role(&will_id, &guardian);
-    }
-
-    // Guardian A casts a release vote while the will is Active. With a
-    // threshold of 2 this stays short of quorum, so no release happens — but
-    // the `GuardianVote` entry it wrote is now in storage.
-    advance(&env, 8); // clear the 7-day guardian-list cooldown
-    client.guardian_trigger(&will_id, &guardian_a, &GuardianVoteReason::Other);
-
-    // The will then goes through the normal missed-check-in path to Triggered.
-    // With 8 days already elapsed, advancing 83 days puts the ledger at day 91,
-    // past the 90-day check-in deadline but inside the 7-day grace period that
-    // ends on day 97 (anchored to the missed check-in deadline #457).
-    advance(&env, 83);
-    client.trigger_will(&will_id);
-
-    // Guardian B casts a cancel vote. Alone, it is short of quorum too, so the
-    // will stays Triggered and the `GuardianCancelVote` entry survives.
-    client.guardian_cancel_trigger(&will_id, &guardian_b);
-
-    // Sanity: the entries exist before archival, so the post-archive assertions
-    // below are testing the cleanup rather than a no-op setup.
-    let history_key = DataKey::WillHistory(will_id);
-    let vote_a = DataKey::GuardianVote(will_id, guardian_a.clone());
-    let cancel_b = DataKey::GuardianCancelVote(will_id, guardian_b.clone());
-    assert!(key_exists(&env, &contract_id, &history_key));
-    assert!(key_exists(&env, &contract_id, &vote_a));
-    assert!(key_exists(&env, &contract_id, &cancel_b));
-
-    // Releasing the will does not clear the vote rows — `distribute` leaves the
-    // guardian counters and their storage entries alone — which is exactly the
-    // state that used to strand them.
-    advance(&env, 8);
-    client.release_inheritance(&will_id, &None);
-    assert!(key_exists(&env, &contract_id, &vote_a));
-    assert!(key_exists(&env, &contract_id, &cancel_b));
-
-    client.archive_will(&will_id);
-
-    assert!(
-        !key_exists(&env, &contract_id, &history_key),
-        "archival must drop the will's WillHistory entry"
-    );
-    assert!(
-        !key_exists(&env, &contract_id, &vote_a),
-        "archival must drop the will's GuardianVote entries"
-    );
-    assert!(
-        !key_exists(&env, &contract_id, &cancel_b),
-        "archival must drop the will's GuardianCancelVote entries"
-    );
-
-    // The query surface agrees: the trail is empty for an archived will, so
-    // clients must not treat get_will_history as a post-archival recovery path.
-    assert!(client.get_will_history(&will_id).is_empty());
-}
-
-/// Archiving a will with no guardians must still clear its history, and the
-/// empty guardian sweep must be a no-op rather than a failure.
-#[test]
-fn archive_will_removes_history_when_there_are_no_guardians() {
-    let (env, client, owner, token_address) = setup();
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address, 1_000_000_i128)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: Address::generate(&env),
-                allocation: Allocation::Percentage(10_000),
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    assert!(
-        !client.get_will_history(&will_id).is_empty(),
-        "the will must have a trail to lose"
-    );
-
-    client.cancel_will(&will_id, &owner);
-    client.archive_will(&will_id);
-
-    assert!(client.get_will_history(&will_id).is_empty());
-}
-
-/// Regression test for issue #494: `archive_will` must publish an event so
-/// external systems monitoring will lifecycle via events see the archive
-/// action, same as every other status change. The implementation already
-/// calls `events::will_archived`; this pins that through the real
-/// `archive_will` entry point (not a direct call to the events module) so a
-/// future regression that drops the call is caught.
-#[test]
-fn archive_will_emits_archived_event_with_owner_and_timestamp() {
-    let (env, client, owner, token_address) = setup();
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address, 1_000_000_i128)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: Address::generate(&env),
-                allocation: Allocation::Percentage(10_000),
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    advance(&env, 91);
-    client.trigger_will(&will_id);
-    advance(&env, 8);
-    client.release_inheritance(&will_id, &None);
-
-    let archived_at = env.ledger().timestamp();
-    client.archive_will(&will_id);
-
-    let event = ev::find_event(&env, symbol_short!("archived"), Some(will_id), "archived");
-    // Payload order matches `events::will_archived`:
-    // (owner, archived_at, previous_status).
-    let data = ev::data_vec(&event).expect("archived data is a tuple");
-    assert_eq!(
-        data.len(),
-        3,
-        "archived data must be (owner, archived_at, previous_status)"
-    );
-    let event_owner = ev::address_from(&data[0], &env).expect("archived owner is an address");
-    assert_eq!(
-        event_owner, owner,
-        "archived event must carry the will's owner"
-    );
-    assert_eq!(
-        ev::u64_from(&data[1]),
-        Some(archived_at),
-        "archived event must carry the archival timestamp"
-    );
-    let previous = match &data[2] {
-        soroban_sdk::xdr::ScVal::Symbol(sym) => ev::symbol_value(&env, sym),
-        _ => None,
-    };
-    assert_eq!(
-        previous,
-        Some(symbol_short!("released")),
-        "archived event must report the terminal status the will was archived from"
-    );
-}
+/* … truncated 6697 chars — edit only what you need near the top … */

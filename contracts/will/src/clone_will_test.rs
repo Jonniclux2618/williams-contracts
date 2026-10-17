@@ -151,3 +151,51 @@ fn clone_does_not_yet_increment_active_will_count() {
         "clone_will must increment active_will_count (#191)"
     );
 }
+
+// --- Tests for issue #53 ---
+
+#[test]
+fn clone_will_rejects_triggered_source() {
+    // #53: a Triggered will must not be clonable; the owner must perform
+    // emergency_checkin instead of escaping inactivity detection via clone.
+    let (env, contract_id, owner, token_address, source_id) = setup();
+    let client = WillContractClient::new(&env, &contract_id);
+
+    // Advance time past the check-in deadline so the will can be triggered.
+    env.ledger().with_mut(|l| l.timestamp += 91 * DAY);
+    client.trigger_will(&source_id);
+    assert_eq!(client.get_will(&source_id).status, WillStatus::Triggered);
+
+    // clone_will must now return WillNotActive.
+    use crate::WillError;
+    assert_eq!(
+        client.try_clone_will(&source_id, &owner, &vec![&env, (token_address, 500_000_i128)]),
+        Err(Ok(WillError::WillNotActive.into())),
+        "clone_will must reject a Triggered source (#53)"
+    );
+}
+
+// --- Tests for issue #54 ---
+
+#[test]
+fn clone_will_rejects_duplicate_tokens() {
+    // #54: passing the same token address twice must fail with DuplicateToken,
+    // matching the guard already present in create_will.
+    let (env, contract_id, owner, token_address, source_id) = setup();
+    let client = WillContractClient::new(&env, &contract_id);
+
+    use crate::WillError;
+    assert_eq!(
+        client.try_clone_will(
+            &source_id,
+            &owner,
+            &vec![
+                &env,
+                (token_address.clone(), 300_000_i128),
+                (token_address.clone(), 200_000_i128),
+            ],
+        ),
+        Err(Ok(WillError::DuplicateToken.into())),
+        "clone_will must reject duplicate token addresses (#54)"
+    );
+}

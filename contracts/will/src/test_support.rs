@@ -7,9 +7,12 @@
 //! It is used to prove that the checks-effects-interactions ordering fixed
 //! in issue #54 prevents a reentrant token from triggering a double payout
 //! during `release_inheritance`.
+//!
+//! Extended in issue #80 to support configurable reentrancy callbacks for
+//! `split_will`, `top_up`, `merge_wills`, and `reveal_and_claim`.
 #![cfg(test)]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env};
 
 use crate::WillContractClient;
 
@@ -20,11 +23,34 @@ enum DataKey {
     ReentrancyTarget,
 }
 
+/// Which will-contract entrypoint to call back into during `transfer`.
+#[contracttype]
+#[derive(Clone)]
+pub enum ReentrancyCallback {
+    /// Attempt `release_inheritance(will_id)` — the original single-entrypoint
+    /// test from issue #54.
+    ReleaseInheritance,
+    /// Attempt a second `top_up(will_id, owner, token, amount)`.
+    TopUp,
+    /// Attempt `merge_wills(owner, will_id_a, will_id_b)`.
+    MergeWills,
+    /// Attempt a second `reveal_and_claim(will_id, claimant, preimage)`.
+    RevealAndClaim,
+}
+
 #[contracttype]
 #[derive(Clone)]
 struct ReentrancyTarget {
     will_contract: Address,
     will_id: u64,
+    /// Secondary will id used by MergeWills callback (will_id_b).
+    will_id_b: u64,
+    owner: Address,
+    token: Address,
+    amount: i128,
+    claimant: Address,
+    preimage: Bytes,
+    callback: ReentrancyCallback,
 }
 
 #[contract]
@@ -55,12 +81,104 @@ impl MaliciousToken {
     /// Configures this token to attempt `release_inheritance(will_id)` on
     /// `will_contract` every time `transfer` is invoked, simulating a
     /// malicious or reentrant token contract.
+    ///
+    /// This is the original single-entrypoint helper kept for backward
+    /// compatibility with the existing `test_reentrant_release_inheritance_cannot_double_pay`
+    /// test.
     pub fn set_reentrancy_target(env: Env, will_contract: Address, will_id: u64) {
+        let dummy = Address::generate(&env);
         env.storage().instance().set(
             &DataKey::ReentrancyTarget,
             &ReentrancyTarget {
                 will_contract,
                 will_id,
+                will_id_b: 0,
+                owner: dummy.clone(),
+                token: dummy.clone(),
+                amount: 0,
+                claimant: dummy,
+                preimage: Bytes::new(&env),
+                callback: ReentrancyCallback::ReleaseInheritance,
+            },
+        );
+    }
+
+    /// Configures the token to attempt a second `top_up` on `will_contract`
+    /// from inside `transfer`, simulating a reentrant top-up attack.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_top_up_reentrancy(
+        env: Env,
+        will_contract: Address,
+        will_id: u64,
+        owner: Address,
+        token: Address,
+        amount: i128,
+    ) {
+        let dummy = Address::generate(&env);
+        env.storage().instance().set(
+            &DataKey::ReentrancyTarget,
+            &ReentrancyTarget {
+                will_contract,
+                will_id,
+                will_id_b: 0,
+                owner,
+                token,
+                amount,
+                claimant: dummy.clone(),
+                preimage: Bytes::new(&env),
+                callback: ReentrancyCallback::TopUp,
+            },
+        );
+    }
+
+    /// Configures the token to attempt `merge_wills(owner, will_id_a, will_id_b)`
+    /// on `will_contract` from inside `transfer`.
+    pub fn set_merge_reentrancy(
+        env: Env,
+        will_contract: Address,
+        will_id_a: u64,
+        will_id_b: u64,
+        owner: Address,
+    ) {
+        let dummy = Address::generate(&env);
+        env.storage().instance().set(
+            &DataKey::ReentrancyTarget,
+            &ReentrancyTarget {
+                will_contract,
+                will_id: will_id_a,
+                will_id_b,
+                owner,
+                token: dummy.clone(),
+                amount: 0,
+                claimant: dummy,
+                preimage: Bytes::new(&env),
+                callback: ReentrancyCallback::MergeWills,
+            },
+        );
+    }
+
+    /// Configures the token to attempt a second `reveal_and_claim` on
+    /// `will_contract` from inside `transfer`.
+    pub fn set_reveal_and_claim_reentrancy(
+        env: Env,
+        will_contract: Address,
+        will_id: u64,
+        claimant: Address,
+        preimage: Bytes,
+    ) {
+        let dummy = Address::generate(&env);
+        env.storage().instance().set(
+            &DataKey::ReentrancyTarget,
+            &ReentrancyTarget {
+                will_contract,
+                will_id,
+                will_id_b: 0,
+                owner: dummy.clone(),
+                token: dummy,
+                amount: 0,
+                claimant,
+                preimage,
+                callback: ReentrancyCallback::RevealAndClaim,
             },
         );
     }
@@ -83,13 +201,50 @@ impl MaliciousToken {
             .instance()
             .get::<_, ReentrancyTarget>(&DataKey::ReentrancyTarget)
         {
-            // Attempt to reenter mid-transfer. `try_release_inheritance`
-            // must fail here: `distribute` commits `will.status =
-            // Released` before this transfer fires, so a second attempt
-            // is rejected with `WillNotTriggered` instead of paying out
-            // twice.
             let will_client = WillContractClient::new(&env, &target.will_contract);
-            let _ = will_client.try_release_inheritance(&target.will_id, &None);
+            match target.callback {
+                ReentrancyCallback::ReleaseInheritance => {
+                    // Attempt to reenter mid-transfer. `distribute` commits
+                    // `will.status = Released` before this transfer fires, so a
+                    // second attempt is rejected with `WillNotTriggered` instead of
+                    // paying out twice.
+                    let _ = will_client.try_release_inheritance(&target.will_id, &None);
+                }
+                ReentrancyCallback::TopUp => {
+                    // Attempt a second top_up inside the first top_up's transfer.
+                    // The will's balance is already updated before the external
+                    // transfer fires (checks-effects-interactions), so the reentrant
+                    // call sees the post-first-top-up balance and must not corrupt it.
+                    let _ = will_client.try_top_up(
+                        &target.will_id,
+                        &target.owner,
+                        &target.token,
+                        &target.amount,
+                    );
+                }
+                ReentrancyCallback::MergeWills => {
+                    // Attempt to merge mid-transfer. Effects are already committed
+                    // before the external transfer fires, so the merge attempt should
+                    // either succeed on a still-valid state or be rejected outright
+                    // by status/ownership checks, never leaving state inconsistent.
+                    let _ = will_client.try_merge_wills(
+                        &target.owner,
+                        &target.will_id,
+                        &target.will_id_b,
+                    );
+                }
+                ReentrancyCallback::RevealAndClaim => {
+                    // Attempt a second reveal_and_claim mid-transfer. The slot is
+                    // already marked claimed and the balance already deducted before
+                    // the transfer fires, so the reentrant attempt must fail with
+                    // `AlreadyClaimed` rather than paying out twice.
+                    let _ = will_client.try_reveal_and_claim(
+                        &target.will_id,
+                        &target.claimant,
+                        &target.preimage,
+                    );
+                }
+            }
         }
     }
 }

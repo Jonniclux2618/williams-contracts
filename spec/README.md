@@ -13,8 +13,36 @@ file to detect spec drift before it ships.
 
 - `will-v<crate-version>.json` — one file per released crate version, named
   after the `version` field in `contracts/will/Cargo.toml` at the time of
-  export (e.g. `will-v0.1.0.json`). Never overwritten once published;
-  a new crate version gets a new file.
+  export (e.g. `will-v0.1.0.json`, `will-v1.3.0.json`). Never overwritten once
+  published; a new crate version gets a new file.
+- `will-v0.1.0.json` — initial baseline specification snapshot.
+- `will-v1.3.0.json` — current specification snapshot synchronized to crate
+  version `1.3.0`, adding:
+  - **Multi-token & mixed-allocation create/update signatures:** `create_will`
+    (`tokens: Vec<(Address, i128)>`, `guardian_threshold: u32`,
+    `keeper_bounty_bps: Option<u32>`, `confirmation_delay_seconds: u64`),
+    `update_periods` (`Option<u64>` parameters), and `update_will_settings`
+    (`Option` parameters for atomic batch updates).
+  - **Confirmation window lifecycle:** `confirm_will`,
+    `refund_unconfirmed_will`.
+  - **Payout resilience & keeper bounty targeting:** `retry_failed_payout`,
+    `redirect_failed_payout`, `set_keeper_bounty_token`.
+  - **Guardian consent & weighted quorums:** `update_guardians_weighted`,
+    `accept_guardian_role`, `reject_guardian_role`, `reset_guardian_consent`,
+    `guardian_cancel_trigger`, `get_guardian_vote_status`,
+    `get_guardian_votes`.
+  - **Estate restructuring & privacy-preserving beneficiaries:** `split_will`,
+    `merge_wills`, `clone_will`, `batch_create_wills`,
+    `add_hashed_beneficiary`, `reveal_and_claim`.
+  - **Archival, closure & paginated queries:** `close_will`, `archive_will`,
+    `get_archived_will`, `extend_archived_will_ttl`, `get_will_history_page`,
+    `get_owner_stats`, `get_owner_status_page`, `audit_protocol_stats`,
+    `repair_protocol_stats`, `recompute_protocol_stats_chunk`.
+  - **Expanded types & error codes:** `Allocation`, `GuardianConsent`,
+    `GuardianSpec`, `HashedBeneficiary`, `ProtocolStatsAudit`, `OwnerStats`,
+    `WillPage`, `GuardianVoteRecord`, updated `Will` / `Beneficiary` /
+    `Guardian` / `WillStatusTransition` fields, and `WillError` codes `1`–`58`
+    (including `InvalidDelegate = 58`).
 
 ## How the artifact is produced
 

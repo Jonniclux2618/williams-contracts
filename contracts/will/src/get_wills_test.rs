@@ -3,6 +3,9 @@
 //! Regression coverage for `get_wills` (#214): asserts the batch-by-id fetch
 //! preserves input order, silently skips nonexistent ids, and panics with
 //! `TooManyIds` when given more than `MAX_GET_WILLS_IDS` entries.
+//!
+//! Also covers #126: reading the beneficiary reverse index must extend the
+//! TTL of the `BeneficiaryWills` entry so dormant indices are not archived.
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -137,5 +140,60 @@ fn panics_when_ids_exceed_max_get_wills_ids() {
     assert_eq!(
         client.try_get_wills(&ids),
         Err(Ok(WillError::TooManyIds.into()))
+    );
+}
+
+#[test]
+fn get_wills_by_beneficiary_extends_index_ttl() {
+    // #126: reading the beneficiary reverse index must bump the TTL of the
+    // `BeneficiaryWills` entry, mirroring `get_wills_by_owner`, so dormant
+    // beneficiary indices are not archived.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(owner.clone());
+    let token_address = sac.address();
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    // Advance the ledger so the index entry's TTL is measurably below the
+    // configured bump target before the read.
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 1_000;
+    });
+
+    let before = env.storage().persistent().get_ttl(&crate::DataKey::BeneficiaryWills(beneficiary.clone()));
+
+    let wills = client.get_wills_by_beneficiary(&beneficiary);
+    assert_eq!(wills.len(), 1);
+
+    let after = env.storage().persistent().get_ttl(&crate::DataKey::BeneficiaryWills(beneficiary.clone()));
+
+    assert!(
+        after > before,
+        "beneficiary index TTL must be extended on read (before={before}, after={after})"
     );
 }

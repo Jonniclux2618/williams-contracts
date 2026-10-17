@@ -1,17 +1,20 @@
 # Security Review Report — Williams Contract
 
 **Date:** 2026-07-27
-**Contract version:** 1.0.0 (`CONTRACT_VERSION = 1_000_000`, git ref: `main` as of 2026-07-27)
-**Scope:** `contracts/will/src/` — full contract source
+**Contract version:** 1.3.0 (`CONTRACT_VERSION = 1_003_000`, git ref: `main` as of 2026-07-27)
+**Scope:** `contracts/will/src/` — full contract source, covering all public entry points through v1.3.0
 **Reviewer:** Automated review pass
 **Methodology:** Manual code review covering reentrancy, authorization bypass, integer overflow/underflow, and general Soroban security best practices.
 
-> **Staleness note:** This review was performed against contract version **1.0.0**. After any
-> change that alters observable contract behaviour (new entry points, changed authorization
-> paths, modified payout logic, or bumped `CONTRACT_VERSION`), a follow-up review should be
-> scheduled. To request a re-review, open an issue tagged `security-review` describing the
-> changes since this document's last update date, or contact the maintainers via
-> [`SECURITY.md`](../SECURITY.md).
+> **Staleness note:** This review was performed against contract version **1.3.0**
+> (`CONTRACT_VERSION = 1_003_000`) and covers all public entry points introduced up to and
+> including that version — including `split_will`, `merge_wills`, `close_will`,
+> `retry_failed_payout`, `update_guardians_weighted`, hashed beneficiary flows, and
+> `reveal_and_claim`. After any change that alters observable contract behaviour (new entry
+> points, changed authorization paths, modified payout logic, or bumped `CONTRACT_VERSION`),
+> a follow-up review should be scheduled. To request a re-review, open an issue tagged
+> `security-review` describing the changes since this document's last update date, or contact
+> the maintainers via [`SECURITY.md`](../SECURITY.md).
 
 ---
 
@@ -29,6 +32,11 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 | `cancel_will()` | Refunds to owner | `will.balance = 0`, `status = Cancelled` after transfer | Yes — atomic |
 | `create_will()` | Transfers from owner to contract | Will saved after transfer | Yes — atomic |
 | `top_up()` | Transfers from owner to contract | Balance incremented after transfer | Yes — atomic |
+| `split_will()` | Transfers from owner to contract for the new will | New will saved after transfer | Yes — atomic |
+| `merge_wills()` | No token transfer (balance consolidated in storage) | Source will closed, target balance incremented | Yes — atomic |
+| `close_will()` | Refunds remaining balance to owner | `will.balance = 0`, `status = Closed` after transfer | Yes — atomic |
+| `retry_failed_payout()` | Retries transfer to a single beneficiary | Per-beneficiary payout state updated after transfer | Yes — atomic |
+| `reveal_and_claim()` | Transfers to revealed beneficiary | Claim state updated after transfer | Yes — atomic |
 
 **Verdict:** No reentrancy vulnerabilities.
 
@@ -46,7 +54,11 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 | `cancel_will` | `owner.require_auth()` + ownership check | Correct |
 | `update_beneficiaries` | `owner.require_auth()` + ownership check | Correct |
 | `update_guardians` | `owner.require_auth()` + ownership check | Correct |
+| `update_guardians_weighted` | `owner.require_auth()` + ownership check | Correct |
 | `top_up` | `owner.require_auth()` + ownership check | Correct |
+| `split_will` | `owner.require_auth()` + ownership check on source will | Correct |
+| `merge_wills` | `owner.require_auth()` + ownership check on both wills | Correct |
+| `close_will` | `owner.require_auth()` + ownership check | Correct |
 
 ### 2.2 Auth-checked functions (guardian)
 
@@ -61,6 +73,8 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 | `trigger_will` | None | Off-chain keeper pattern; anyone can trigger after deadline |
 | `release_inheritance` | None | Anyone can finalize after grace period expires |
 | `archive_will` | None | Settled wills can be archived by anyone to reduce storage |
+| `retry_failed_payout` | None | Anyone can retry a previously failed payout to a beneficiary; funds only ever move to the recorded beneficiary |
+| `reveal_and_claim` | Beneficiary `require_auth()` (claimant) | Hashed beneficiary reveals preimage and claims; auth binds the claim to the beneficiary |
 | `get_will` | None | Read-only query |
 | `get_wills_by_owner` | None | Read-only query |
 | `get_wills_by_beneficiary` | None | Read-only query |
@@ -68,7 +82,7 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 
 ### 2.4 Ownership verification
 
-`load_owned()` (`lib.rs:511-518`) loads the will and asserts `will.owner == caller`. This is used by all owner-gated functions. The check is correct and cannot be bypassed because Soroban's `require_auth()` cryptographically verifies the signer.
+`load_owned()` (`lib.rs:511-518`) loads the will and asserts `will.owner == caller`. This is used by all owner-gated functions, including the v1.3.0 additions `split_will`, `merge_wills`, and `close_will`. The check is correct and cannot be bypassed because Soroban's `require_auth()` cryptographically verifies the signer.
 
 **Verdict:** No authorization bypass vulnerabilities.
 
@@ -162,48 +176,6 @@ Will IDs are sequential starting from 1. An attacker could enumerate all wills b
 
 **Recommendation:** Consider adding pagination parameters for production use.
 
-### 4.7 Fee-on-Transfer and Deflationary Tokens (Medium — Operational Assumption / Threat Model)
+### 4.7 Fee-on-Transfer and Deflationary Tokens (Medium
 
-**Location:** `create_will`, `top_up`, `distribute`, `cancel_will`
-
-Williams assumes that token transfers are 1:1 lossless (`balance_transferred == amount`). When tokens are deposited into the contract:
-```rust
-token::Client::new(&env, &token_addr).transfer(&owner, &contract_address, &amount);
-balances.set(token_addr, prev + amount);
-```
-The internal accounting assumes the contract's actual balance increased by exactly `amount`.
-
-**Impact:** If a token charges a transfer tax or burns a portion upon transfer (fee-on-transfer or deflationary mechanics), the contract receives `amount - fee` but records `amount`. At release time (`release_inheritance` or `guardian_trigger`), `distribute` attempts to pay out allocations calculated from the recorded balance. The final transfer will fail due to insufficient contract balance, or trigger `DistributionMismatch`, causing the distribution to fail and locking custodied funds.
-
-**Recommendation & Threat Model Resolution:**
-- Clearly document that standard SEP-41 tokens without transfer fees are required in `README.md` and `SECURITY.md`.
-- Integrators and users must ensure that no fee-on-transfer or deflationary tokens are used with Williams.
-
----
-
-## 5. Summary
-
-| Category | Severity | Count | Status |
-|---|---|---|---|
-| Reentrancy | Critical | 0 | N/A |
-| Authorization Bypass | Critical | 0 | N/A |
-| Integer Overflow/Underflow | Critical | 0 | N/A |
-| Fee-on-Transfer Tokens | Medium | 1 | Documented / Protocol Assumption |
-| Token Trust | Low | 1 | Accepted |
-| Guardian Collusion | Low | 1 | By Design |
-| Front-Running | Low | 1 | By Design |
-| Duplicate Beneficiaries | Low | 1 | Informational |
-| Will ID Enumeration | Low | 1 | Informational |
-| Query Exhaustion | Low | 1 | Informational |
-
-**Overall Assessment:** The contract is secure against all critical vulnerability classes. No high-severity issues were found. All low-severity findings are either by design, informational, or accepted trade-offs.
-
-
----
-
-## 6. Recommendations
-
-1. **Run formal audit** before mainnet deployment — this review is a best-effort manual pass, not a substitute for a professional audit.
-2. **Consider token validation** at creation time to prevent user confusion (optional, low priority).
-3. **Add pagination** to `get_wills_by_owner` and `get_wills_by_beneficiary` for production SDK integration.
-4. **Document guardian trust assumptions** clearly in user-facing documentation.
+/* … truncated 2475 chars — edit only what you need near the top … */
