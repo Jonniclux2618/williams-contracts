@@ -99,7 +99,15 @@ fn merge_adopts_the_stricter_of_the_two_thresholds() {
     let g2 = Address::generate(&env);
     let g3 = Address::generate(&env);
 
-    let a = create_will(&env, &client, &owner, &token, 1_000_000, &[g1.clone()], 1);
+    let a = create_will(
+        &env,
+        &client,
+        &owner,
+        &token,
+        1_000_000,
+        std::slice::from_ref(&g1),
+        1,
+    );
     let b = create_will(
         &env,
         &client,
@@ -191,7 +199,15 @@ fn merge_keeps_the_survivors_stronger_threshold() {
         &[g1.clone(), g2.clone()],
         2,
     );
-    let b = create_will(&env, &client, &owner, &token, 2_000_000, &[g3.clone()], 1);
+    let b = create_will(
+        &env,
+        &client,
+        &owner,
+        &token,
+        2_000_000,
+        std::slice::from_ref(&g3),
+        1,
+    );
 
     client.merge_wills(&owner, &a, &b);
 
@@ -212,8 +228,24 @@ fn merge_rejects_a_threshold_the_merged_list_cannot_reach() {
     let g1 = Address::generate(&env);
     let g2 = Address::generate(&env);
 
-    let a = create_will(&env, &client, &owner, &token, 1_000_000, &[g1.clone()], 1);
-    let b = create_will(&env, &client, &owner, &token, 2_000_000, &[g2.clone()], 1);
+    let a = create_will(
+        &env,
+        &client,
+        &owner,
+        &token,
+        1_000_000,
+        std::slice::from_ref(&g1),
+        1,
+    );
+    let b = create_will(
+        &env,
+        &client,
+        &owner,
+        &token,
+        2_000_000,
+        std::slice::from_ref(&g2),
+        1,
+    );
 
     // Reachable on each source list (1 <= 1); corrupt the survivor's stored
     // threshold to 3 — above the merged total weight of 2 — to prove the

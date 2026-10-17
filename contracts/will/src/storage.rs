@@ -126,6 +126,15 @@ pub(crate) enum DataKey {
     /// re-reads or re-validates the will, so it still succeeds even if the
     /// will has since been archived.
     FailedPayout(u64, Address, Address),
+    /// Per-owner, per-status index: the list of will ids owned by `address`
+    /// that currently carry `status` (#77).
+    ///
+    /// Maintained alongside `OwnerWills` so that
+    /// `get_wills_by_owner_and_status` / `get_owner_status_page` can
+    /// look up only the relevant subset of ids instead of scanning every will
+    /// the owner has ever created. The footprint is `O(|wills in status|)`
+    /// per read instead of `O(|all owner wills|)`.
+    OwnerStatusWills(Address, WillStatus),
 }
 
 /// The data stored for each guardian vote: the Unix timestamp when the vote
@@ -512,7 +521,79 @@ pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
     }
 }
 
-/// Persists a will's state and refreshes its storage TTL.
+/// Compares stored protocol stats against a fresh full-scan recomputation,
+/// returning `(consistent, discrepancies, computed_active_count)` without
+/// ever holding a complete second copy of `ProtocolStats` in memory (#76).
+///
+/// `discrepancies` contains only the [`TokenLockedBalance`] entries where the
+/// stored and computed totals differ (including tokens present in one side but
+/// not the other). When the stats are consistent the list is empty, so the
+/// caller can return a lightweight `ProtocolStatsAudit` regardless of how many
+/// tokens the protocol tracks.
+///
+/// This is the building block for `audit_protocol_stats`; for a full copy of
+/// the recomputed stats use `recompute_protocol_stats` or the chunked variant.
+pub fn compare_protocol_stats(
+    env: &Env,
+    stored: &ProtocolStats,
+) -> (bool, Vec<TokenLockedBalance>, u64) {
+    let last_id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextWillId)
+        .unwrap_or(0);
+
+    let mut computed_active: u64 = 0;
+    // Accumulate computed totals into a Map; we compare against stored
+    // token-by-token after the scan without keeping a full ProtocolStats copy.
+    let mut computed_totals: Map<Address, i128> = Map::new(env);
+    let mut id = 1u64;
+    while id <= last_id {
+        if let Some(will) = env
+            .storage()
+            .persistent()
+            .get::<_, Will>(&DataKey::Will(id))
+        {
+            if is_live_status(will.status) {
+                computed_active += 1;
+                for (token, amount) in will.balances.iter() {
+                    let prev = computed_totals.get(token.clone()).unwrap_or(0);
+                    computed_totals.set(token, prev + amount);
+                }
+            }
+        }
+        id += 1;
+    }
+
+    let mut discrepancies: Vec<TokenLockedBalance> = Vec::new(env);
+    let mut consistent = computed_active == stored.active_will_count;
+
+    // Check every token in stored against computed.
+    for entry in stored.total_locked_by_token.iter() {
+        let computed_total = computed_totals.get(entry.token.clone()).unwrap_or(0);
+        computed_totals.remove(entry.token.clone());
+        if computed_total != entry.total_locked {
+            consistent = false;
+            discrepancies.push_back(TokenLockedBalance {
+                token: entry.token,
+                total_locked: computed_total,
+            });
+        }
+    }
+    // Any token in computed but not in stored is also a discrepancy.
+    for (token, total) in computed_totals.iter() {
+        if total != 0 {
+            consistent = false;
+            discrepancies.push_back(TokenLockedBalance {
+                token,
+                total_locked: total,
+            });
+        }
+    }
+
+    (consistent, discrepancies, computed_active)
+}
+
 /// Persists a will's state, refreshing its storage TTL unless the will has
 /// reached a terminal state.
 ///
@@ -644,7 +725,70 @@ fn index_push(env: &Env, key: DataKey, will_id: u64) {
 pub fn assert_index_capacity(env: &Env, owner: &Address, beneficiaries: &Vec<Beneficiary>) {
     assert_single_index_capacity(env, &DataKey::OwnerWills(owner.clone()));
     for beneficiary in beneficiaries.iter() {
+        // Lazily trim stale terminal will IDs from the beneficiary's reverse
+        // index before checking capacity (#75). A will whose storage entry has
+        // been TTL-archived by the network (or reached a terminal status and
+        // was never explicitly archived) leaves its ID in the beneficiary's
+        // index indefinitely. Without trimming, a beneficiary on enough
+        // historical wills permanently exhausts `MAX_WILLS_PER_INDEX` even
+        // though they hold no live claims.
+        trim_stale_beneficiary_index(env, &beneficiary.address);
         assert_single_index_capacity(env, &DataKey::BeneficiaryWills(beneficiary.address.clone()));
+    }
+}
+
+/// Removes IDs of wills that are no longer live from the `BeneficiaryWills`
+/// index for `beneficiary`.
+///
+/// A will ID is considered stale if its persistent-storage entry is absent
+/// (TTL-archived by the network) or its status is a terminal state
+/// (`Released`, `Cancelled`, or `Settled`). Stale IDs count toward
+/// `MAX_WILLS_PER_INDEX` and permanently block the beneficiary from being
+/// named on new wills once the cap is reached (#75). By purging them here,
+/// before the capacity check in `assert_index_capacity`, we reclaim index
+/// slots that the normal release/cancel/archive paths should have freed.
+///
+/// This is a **write**: when stale IDs are found the trimmed list is written
+/// back to persistent storage. It is called only from `assert_index_capacity`,
+/// which runs inside `create_will` before the token transfer, so the write is
+/// safe even in that context.
+fn trim_stale_beneficiary_index(env: &Env, beneficiary: &Address) {
+    let key = DataKey::BeneficiaryWills(beneficiary.clone());
+    let ids: Vec<u64> = match env.storage().persistent().get(&key) {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut live_ids: Vec<u64> = Vec::new(env);
+    let mut found_stale = false;
+
+    for id in ids.iter() {
+        let is_live = match env
+            .storage()
+            .persistent()
+            .get::<_, Will>(&DataKey::Will(id))
+        {
+            // Will entry is present: keep it only if it is in a non-terminal
+            // (live) state.
+            Some(will) => is_live_status(will.status),
+            // Will entry is absent: either TTL-archived by the network or
+            // explicitly archived via `archive_will`. Either way, stale.
+            None => false,
+        };
+        if is_live {
+            live_ids.push_back(id);
+        } else {
+            found_stale = true;
+        }
+    }
+
+    if found_stale {
+        env.storage().persistent().set(&key, &live_ids);
+        if !live_ids.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+        }
     }
 }
 
@@ -765,6 +909,114 @@ pub fn get_owner_wills(env: &Env, owner: &Address) -> Vec<u64> {
             .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
     }
     ids.unwrap_or_else(|| Vec::new(env))
+}
+
+// ── Per-owner, per-status index helpers (#77) ────────────────────────────────
+
+/// Adds `will_id` to the per-owner, per-status index for `status`.
+///
+/// Called whenever a will first enters `status` (creation, trigger, emergency
+/// check-in, etc.).  The list is capped at `MAX_WILLS_PER_INDEX` and writes
+/// are skipped when the id is already present, matching the behaviour of the
+/// shared `index_push` helper used by `OwnerWills`.
+pub fn index_owner_status(env: &Env, owner: &Address, status: WillStatus, will_id: u64) {
+    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(will_id) {
+        if ids.len() >= MAX_WILLS_PER_INDEX {
+            // Silently drop rather than panic: the primary OwnerWills index
+            // already enforces the cap before any will can be created, so
+            // this path is unreachable in practice.  If it ever is reached,
+            // failing here would block a status transition, which is worse
+            // than a temporarily incomplete secondary index.
+            return;
+        }
+        ids.push_back(will_id);
+        env.storage().persistent().set(&key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+}
+
+/// Removes `will_id` from the per-owner, per-status index for `status`.
+///
+/// Called whenever a will leaves `status` (transition to a new status,
+/// removal from the owner index on cancellation/release, or archival).
+/// Returns without writing when the id is absent.
+pub fn remove_owner_status_index(env: &Env, owner: &Address, status: WillStatus, will_id: u64) {
+    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
+        return;
+    };
+    if ids.first_index_of(will_id).is_none() {
+        return;
+    }
+    let mut new_ids = Vec::new(env);
+    for id in ids.iter() {
+        if id != will_id {
+            new_ids.push_back(id);
+        }
+    }
+    if new_ids.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+}
+
+/// Moves `will_id` from the `from` status bucket to the `to` status bucket
+/// in the per-owner, per-status index.
+///
+/// This is the single call-site a status transition needs: it removes the id
+/// from the old bucket and inserts it into the new one atomically (within the
+/// same contract invocation).
+pub fn transition_owner_status_index(
+    env: &Env,
+    owner: &Address,
+    from: WillStatus,
+    to: WillStatus,
+    will_id: u64,
+) {
+    remove_owner_status_index(env, owner, from, will_id);
+    index_owner_status(env, owner, to, will_id);
+}
+
+/// Returns the ids from the per-owner, per-status index for `status`, also
+/// refreshing the TTL so a read-only query keeps the entry alive.
+pub fn get_owner_status_wills(env: &Env, owner: &Address, status: WillStatus) -> Vec<u64> {
+    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let ids: Option<Vec<u64>> = env.storage().persistent().get(&key);
+    if ids.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+    ids.unwrap_or_else(|| Vec::new(env))
+}
+
+/// Removes `will_id` from every per-owner, per-status bucket it might occupy.
+///
+/// Used by `archive_will` and any cleanup path that removes a will from the
+/// owner index without knowing which status it was last in.
+pub fn remove_owner_status_index_all(env: &Env, owner: &Address, will_id: u64) {
+    for status in [
+        WillStatus::PendingConfirmation,
+        WillStatus::Active,
+        WillStatus::Triggered,
+        WillStatus::Released,
+        WillStatus::Cancelled,
+        WillStatus::Settled,
+    ] {
+        remove_owner_status_index(env, owner, status, will_id);
+    }
 }
 
 /// Returns the list of will ids `beneficiary` is named in.
@@ -948,10 +1200,6 @@ pub fn set_guardian_voted(
         .persistent()
         .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }
-
-/// Recomputes the live `(weight, count)` of release votes for `will` from
-/// storage, counting each guardian at most once and ignoring expired votes.
-///
 
 /// Removes the trigger vote recorded for `guardian` against `will_id`, if any.
 ///
@@ -1411,6 +1659,11 @@ pub fn archive_will(env: &Env, will: &Will) {
     // Remove from owner index, reusing the shared helper so the TTL is bumped
     // consistently with every other removal path (fixes #332).
     remove_owner_index(env, &will.owner, will.id);
+
+    // Remove from the per-owner, per-status index (#77): the will may be in
+    // Released, Cancelled, or Settled when archive_will is called, so sweep
+    // all buckets to avoid leaving a dangling id behind.
+    remove_owner_status_index_all(env, &will.owner, will.id);
 
     // If the will was in Triggered status, remove it from the global
     // TriggeredWills index so keepers/indexers never see a dangling id

@@ -4,7 +4,7 @@ version = "1.3.0"
 edition = "2021"
 license = "MIT"
 description = "Williams: trustless on-chain inheritance and dead man's switch protocol for Stellar Soroban"
-repository = "https://github.com/Williams/williams-contracts"
+repository = "https://github.com/willi-d7/williams-contracts"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

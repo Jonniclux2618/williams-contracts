@@ -88,7 +88,8 @@ WILL_ID="$(stellar contract invoke \
   --grace_period_days 1 \
   --guardians "[]" \
   --guardian_threshold 0 \
-  --keeper_bounty_bps "null")"
+  --keeper_bounty_bps "null" \
+  --confirmation_delay_seconds 0)"
 echo "Created will id: $WILL_ID"
 
 log "get_will: reading back the will we just created"

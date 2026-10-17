@@ -101,6 +101,13 @@ mod regression_test;
 #[cfg(test)]
 mod test_support;
 
+/// Reentrancy regression tests for issue #80: verifies that `top_up`,
+/// `merge_wills`, `split_will`, and `reveal_and_claim` are all protected by
+/// the checks-effects-interactions ordering when a malicious SEP-41 token
+/// calls back into the contract from inside `transfer`.
+#[cfg(test)]
+mod reentrancy_test;
+
 /// Unit tests for the `will_created` event payload extended with
 /// per-token breakdowns (see event_snapshot_test module docs).
 #[cfg(test)]
@@ -138,8 +145,6 @@ mod issue_355_test;
 #[cfg(test)]
 mod issue_356_test;
 #[cfg(test)]
-mod reset_guardian_consent_test;
-#[cfg(test)]
 // mod issue_357_test; // TODO: ContractEvents API changed in soroban-sdk v28
 /// Regression tests for issues #358-#361: the distinct-token cap in `top_up`,
 /// the shared guardian-vote expiry rule, `limit == 0` pagination parity in
@@ -159,6 +164,8 @@ mod issue_361_test;
 mod issue_378_381_test;
 #[cfg(test)]
 mod issue_414_test;
+#[cfg(test)]
+mod reset_guardian_consent_test;
 
 /// Regression test for issue #424: `get_time_until_deadline` returns a
 /// negative `i64` (not a huge wrapped value) when the deadline is in the past.
@@ -454,6 +461,26 @@ mod issue_18_test;
 mod issue_19_test;
 #[cfg(test)]
 mod issue_20_test;
+
+/// Regression tests for issue #1: `archive_will` must refuse archival while
+/// any hashed beneficiary slot in a `Released` will is still unclaimed.
+#[cfg(test)]
+mod issue_1_archive_hashed_test;
+
+/// Tests for issue #2: `guardian_cancel_pending_will` lets a guardian quorum
+/// cancel a stalled `PendingConfirmation` will and refund the owner.
+#[cfg(test)]
+mod issue_2_guardian_pending_test;
+
+/// Tests for issue #3: `batch_check_in` now accepts an authorized delegate as
+/// `caller`, mirroring the single-will `check_in` entrypoint.
+#[cfg(test)]
+mod issue_3_batch_delegate_test;
+
+/// Tests for issue #4: `top_up` probes new token addresses against the SEP-41
+/// `decimals()` interface before accepting a transfer.
+#[cfg(test)]
+mod issue_4_topup_sep41_test;
 
 use soroban_sdk::{
     contract, contractimpl, log, panic_with_error, symbol_short, token, xdr::ToXdr, Address, Bytes,
@@ -947,6 +974,7 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::index_owner_status(&env, &owner, status, will_id);
         storage::increment_active_will_count(&env);
 
         // Increment locked value for each token in this will
@@ -1046,6 +1074,13 @@ impl WillContract {
         );
         assert_valid_percentages(&env, &will.beneficiaries, &will.hashed_beneficiaries);
 
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::PendingConfirmation,
+            WillStatus::Active,
+            will_id,
+        );
         will.status = WillStatus::Active;
         will.last_checkin = now;
         will.confirmation_deadline = None;
@@ -1113,6 +1148,12 @@ impl WillContract {
         storage::decrement_active_will_count(&env);
         storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
 
+        storage::remove_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::PendingConfirmation,
+            will_id,
+        );
         will.balance = 0;
         will.balances = Map::new(&env);
         will.status = WillStatus::Cancelled;
@@ -1142,6 +1183,143 @@ impl WillContract {
         }
 
         events::will_cancelled(&env, will_id, &owner, token_count);
+    }
+
+    /// Allows a guardian quorum to cancel a will that is stuck in
+    /// `PendingConfirmation` and return the owner's deposited funds (#2).
+    ///
+    /// When an owner creates a will with a confirmation delay but then loses
+    /// access to their signing keys or becomes incapacitated before calling
+    /// `confirm_will`, the will remains in `PendingConfirmation` indefinitely.
+    /// `refund_unconfirmed_will` handles the automated timeout path
+    /// (permissionless, after `confirmation_deadline + 7 days`), but guardians
+    /// named on the will need a faster recovery path if they know the owner is
+    /// incapacitated before the timeout elapses.
+    ///
+    /// Once the confirmation deadline has passed (i.e. the owner failed to
+    /// confirm in time), a guardian quorum (`guardian_threshold` accumulated
+    /// vote weight) can force the will to `Cancelled` and refund all deposited
+    /// tokens to `will.owner` without waiting for the full 7-day grace margin.
+    /// Votes are deduplicated and expire after `grace_period_days` exactly
+    /// as they do in `guardian_trigger`.
+    ///
+    /// # Parameters
+    /// - `will_id`: the unconfirmed will to cancel.
+    /// - `guardian`: the guardian casting a cancellation vote; must authorize.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::WillNotConfirmed`] if the will is not in
+    ///   `PendingConfirmation` status.
+    /// - [`WillError::ConfirmationWindowExpired`] if the will does not have a
+    ///   confirmation deadline set.
+    /// - [`WillError::CheckinNotDue`] if the confirmation deadline has not yet
+    ///   elapsed (the owner still has time to confirm; guardians cannot
+    ///   interfere during a live confirmation window).
+    /// - [`WillError::NotGuardian`] if `guardian` is not a named guardian of
+    ///   this will.
+    /// - [`WillError::GuardianNotConsented`] if the guardian has not yet
+    ///   accepted their role.
+    /// - [`WillError::AlreadyVoted`] if this guardian has already cast a vote
+    ///   in the current cycle.
+    pub fn guardian_cancel_pending_will(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let mut will = load_will(&env, will_id);
+
+        if will.status != WillStatus::PendingConfirmation {
+            panic_with_error!(&env, WillError::WillNotConfirmed);
+        }
+
+        let deadline = match will.confirmation_deadline {
+            Some(d) => d,
+            None => panic_with_error!(&env, WillError::ConfirmationWindowExpired),
+        };
+
+        let now = env.ledger().timestamp();
+        // Guardians may only vote after the confirmation deadline has elapsed —
+        // while the window is live the owner can still confirm, so guardian
+        // interference would be premature.
+        if now <= deadline {
+            panic_with_error!(&env, WillError::CheckinNotDue);
+        }
+
+        let weight = match will.guardians.iter().find(|g| g.address == guardian) {
+            Some(g) => {
+                if g.consent != GuardianConsent::Accepted {
+                    panic_with_error!(&env, WillError::GuardianNotConsented);
+                }
+                g.weight
+            }
+            None => panic_with_error!(&env, WillError::NotGuardian),
+        };
+
+        // Re-use the trigger-vote namespace for deduplication; expiry is
+        // anchored to `grace_period_days` for consistency with guardian_trigger.
+        let expiry_days = will.grace_period_days;
+        if storage::has_guardian_voted(&env, will_id, &guardian, now, expiry_days) {
+            panic_with_error!(&env, WillError::AlreadyVoted);
+        }
+        storage::set_guardian_voted(&env, will_id, &guardian, now, GuardianVoteReason::Other);
+
+        let (live_weight, live_votes) =
+            storage::recount_guardian_votes(&env, &will, now, expiry_days);
+        will.guardian_vote_weight = live_weight;
+        will.guardian_votes = live_votes;
+        storage::save_will(&env, &will);
+
+        events::guardian_voted(&env, will_id, &guardian, weight, will.guardian_vote_weight);
+
+        if will.guardian_vote_weight >= will.guardian_threshold {
+            // Quorum reached: cancel the will and refund the owner.
+            let owner = will.owner.clone();
+            let contract_address = env.current_contract_address();
+            let token_count = will.balances.len();
+            let balances_snapshot = will.balances.clone();
+            let prior_status = will.status;
+
+            storage::reset_guardian_votes(&env, &will);
+
+            storage::decrement_active_will_count(&env);
+            storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
+
+            will.balance = 0;
+            will.balances = Map::new(&env);
+            will.status = WillStatus::Cancelled;
+            will.confirmation_deadline = None;
+            will.guardian_vote_weight = 0;
+            will.guardian_votes = 0;
+
+            storage::remove_owner_index(&env, &owner, will_id);
+            for beneficiary in will.beneficiaries.iter() {
+                storage::remove_beneficiary_index(&env, &beneficiary.address, will_id);
+            }
+
+            storage::save_will(&env, &will);
+
+            record_transition(
+                &env,
+                will_id,
+                prior_status,
+                WillStatus::Cancelled,
+                &guardian,
+                symbol_short!("gcancel"),
+            );
+
+            // --- INTERACTIONS ---
+            for (token_addr, balance) in balances_snapshot.iter() {
+                if balance > 0 {
+                    token::Client::new(&env, &token_addr).transfer(
+                        &contract_address,
+                        &owner,
+                        &balance,
+                    );
+                }
+            }
+
+            events::will_cancelled(&env, will_id, &owner, token_count);
+        }
+
+        storage::bump_instance_ttl(&env);
     }
 
     // -----------------------------------------------------------------------
@@ -1210,10 +1388,36 @@ impl WillContract {
 
     /// Sets or replaces the delegate address for `will_id`. Only callable
     /// by the owner while the will is `Active`. Pass `None` to clear.
+    ///
+    /// # Delegate eligibility (#31)
+    ///
+    /// - The delegate cannot be the will's `owner` (self-delegation is
+    ///   redundant and emits misleading `delegate_set` audit events).
+    /// - The delegate cannot be the contract's own address
+    ///   (`env.current_contract_address()`), which cannot sign `check_in`
+    ///   invocations.
+    /// - Guardians and beneficiaries are permitted to serve as delegates when
+    ///   the owner chooses to entrust them with routine `check_in` maintenance,
+    ///   as a delegate's authority is strictly limited to resetting the
+    ///   check-in countdown and confers no withdrawal, cancellation, or
+    ///   early-release power.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotOwner`] if `owner` does not own the will.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::InvalidDelegate`] if `delegate` is `Some(addr)` where
+    ///   `addr == owner` or `addr == env.current_contract_address()`.
     pub fn set_delegate(env: Env, will_id: u64, owner: Address, delegate: Option<Address>) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if let Some(ref addr) = delegate {
+            if addr == &owner || addr == &env.current_contract_address() {
+                panic_with_error!(&env, WillError::InvalidDelegate);
+            }
+        }
 
         will.delegate = delegate.clone();
         storage::save_will(&env, &will);
@@ -1269,8 +1473,15 @@ impl WillContract {
     }
 
     /// Batch check-in across multiple wills in a single transaction.
-    /// All wills must be owned by `owner` and in `Active` status.
-    /// Panics if any will ID is invalid, not owned by `owner`, or not `Active`.
+    /// All wills must be owned or delegated to `caller` and in `Active` status.
+    /// Panics if any will ID is invalid, not owned or delegated to `caller`,
+    /// or not `Active`.
+    ///
+    /// Mirrors the single-will `check_in` entrypoint: `caller` may be either
+    /// the will's owner or the will's authorized delegate. This allows
+    /// automated delegates (e.g. hot-wallet cron jobs managing multiple wills
+    /// for a principal) to batch check-ins without forcing individual calls
+    /// per will (#3).
     ///
     /// At most `batch_check_in_limit::MAX_BATCH_CHECK_IN` (50) IDs are accepted
     /// per call; longer inputs panic with [`WillError::BatchTooLarge`]. Every ID
@@ -1284,10 +1495,11 @@ impl WillContract {
     ///   `batch_check_in_limit::MAX_BATCH_CHECK_IN` ids are supplied.
     /// - [`WillError::DuplicateWillId`] if the same will id appears more than once.
     /// - [`WillError::WillNotFound`] if any id names no will.
-    /// - [`WillError::NotOwner`] if any of those wills is not owned by `owner`.
+    /// - [`WillError::NotOwner`] if `caller` is neither the owner nor the
+    ///   delegate of any will in the batch.
     /// - [`WillError::WillNotActive`] if any of those wills is not `Active`.
-    pub fn batch_check_in(env: Env, will_ids: Vec<u64>, owner: Address) {
-        owner.require_auth();
+    pub fn batch_check_in(env: Env, will_ids: Vec<u64>, caller: Address) {
+        caller.require_auth();
         batch_check_in_limit::assert_within_limit(&env, will_ids.len());
         // Reject repeats before any storage write, so a batch can never be
         // partially applied and the `batch_checkin` count always matches the
@@ -1297,8 +1509,9 @@ impl WillContract {
         let count = will_ids.len();
 
         for will_id in will_ids.iter() {
-            let mut will = load_owned(&env, will_id, &owner);
+            let mut will = load_will(&env, will_id);
             assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+            assert_owner_or_delegate(&env, &will, &caller);
 
             will.last_checkin = now;
             let next_deadline = checked_add_timestamp(
@@ -1316,14 +1529,14 @@ impl WillContract {
                 will_id,
                 WillStatus::Active,
                 WillStatus::Active,
-                &owner,
+                &caller,
                 symbol_short!("checkin"),
             );
 
-            events::check_in(&env, will_id, &owner, next_deadline);
+            events::check_in(&env, will_id, &caller, next_deadline);
         }
 
-        events::batch_checkin(&env, &owner, &will_ids, count);
+        events::batch_checkin(&env, &caller, &will_ids, count);
         storage::bump_instance_ttl(&env);
     }
 
@@ -1372,6 +1585,13 @@ impl WillContract {
         // whenever a keeper happened to call `trigger_will` (#457). This makes
         // the release time a pure function of the owner's last check-in, so a
         // delayed trigger can neither postpone nor accelerate the release.
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Active,
+            WillStatus::Triggered,
+            will_id,
+        );
         will.status = WillStatus::Triggered;
         will.trigger_time = Some(deadline);
         let grace_period_ends = grace_deadline(&env, &will);
@@ -1441,6 +1661,13 @@ impl WillContract {
         storage::reset_guardian_votes(&env, &will);
         storage::reset_guardian_cancel_votes(&env, &will);
 
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Triggered,
+            WillStatus::Active,
+            will_id,
+        );
         will.status = WillStatus::Active;
         will.trigger_time = None;
         will.last_checkin = now;
@@ -1683,7 +1910,9 @@ impl WillContract {
         } else {
             let owner = match storage::load_will(&env, will_id) {
                 Ok(will) => Some(will.owner),
-                Err(_) => storage::load_archived_will(&env, will_id).ok().map(|w| w.owner),
+                Err(_) => storage::load_archived_will(&env, will_id)
+                    .ok()
+                    .map(|w| w.owner),
             };
             owner.as_ref() == Some(&caller)
         };
@@ -1750,6 +1979,12 @@ impl WillContract {
         // permanently inflated (#353). A second per-token loop here would
         // deduct each total twice (#5).
 
+        storage::remove_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Active,
+            will_id,
+        );
         will.balance = 0;
         will.balances = Map::new(&env);
         will.status = WillStatus::Cancelled;
@@ -1800,6 +2035,13 @@ impl WillContract {
             WillError::WillNotReleased,
         );
 
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Released,
+            WillStatus::Settled,
+            will_id,
+        );
         will.status = WillStatus::Settled;
         storage::save_will(&env, &will);
 
@@ -2396,10 +2638,12 @@ impl WillContract {
         // Reset last_checkin to now so the new periods apply from this moment,
         // preventing retroactive expiration if the owner reduces the period below
         // the already elapsed time (#15, #33).
+        let now = env.ledger().timestamp();
         will.last_checkin = now;
         let period_seconds = checked_days_to_seconds(&env, will.checkin_period_days);
         let calculated_deadline = checked_add_timestamp(&env, now, period_seconds);
-        let next_deadline = core::cmp::max(calculated_deadline, checked_add_timestamp(&env, now, 1));
+        let next_deadline =
+            core::cmp::max(calculated_deadline, checked_add_timestamp(&env, now, 1));
         storage::save_will(&env, &will);
 
         events::periods_updated(
@@ -2613,6 +2857,19 @@ impl WillContract {
             panic_with_error!(&env, WillError::InvalidTokenCount);
         }
 
+        // For tokens not already held by this will, verify that the address
+        // implements the SEP-41 token interface before accepting a transfer.
+        // `create_will` does the same probe via `assert_valid_tokens`; without
+        // it a non-compliant address could be added to `will.balances`, causing
+        // `distribute` to fail during estate release and trapping all funds (#4).
+        // Tokens the will already holds skip the probe — they were validated at
+        // creation time, and skipping the call saves CPU instructions on the
+        if !will.balances.contains_key(token.clone())
+            && token::Client::new(&env, &token).try_decimals().is_err()
+        {
+            panic_with_error!(&env, WillError::InvalidToken);
+        }
+
         // Snapshot values needed after state mutation (checks-effects-interactions).
         let prev = will.balances.get(token.clone()).unwrap_or(0);
         let new_balance = prev + amount;
@@ -2752,10 +3009,10 @@ impl WillContract {
                 let deadline = checked_deadline_as_i64(&env, trigger_time, will.grace_period_days);
                 Some(deadline - now)
             }
-            WillStatus::PendingConfirmation => will.confirmation_deadline.map(|dl| (dl as i64) - now),
-            WillStatus::Released
-            | WillStatus::Cancelled
-            | WillStatus::Settled => None,
+            WillStatus::PendingConfirmation => {
+                will.confirmation_deadline.map(|dl| (dl as i64) - now)
+            }
+            WillStatus::Released | WillStatus::Cancelled | WillStatus::Settled => None,
         }
     }
 
@@ -2832,10 +3089,24 @@ impl WillContract {
     ///
     /// Cost grows linearly with the number of wills ever created; once that
     /// exceeds the per-invocation budget, run it via simulation only.
+    ///
+    /// Memory usage: the `computed` field of the returned [`ProtocolStatsAudit`]
+    /// is **sparse** — it contains only the token entries that differ from
+    /// `stored` (i.e. the discrepancies). When `consistent == true` its
+    /// `total_locked_by_token` list is empty. This avoids holding two full
+    /// copies of the token-balance list simultaneously, which on a large
+    /// registry would exceed Soroban's transaction memory budget (#76).
     pub fn audit_protocol_stats(env: Env) -> ProtocolStatsAudit {
         let stored = storage::get_protocol_stats(&env);
-        let computed = storage::recompute_protocol_stats(&env);
-        let consistent = stats_match(&stored, &computed);
+        let (consistent, discrepancies, computed_active_count) =
+            storage::compare_protocol_stats(&env, &stored);
+        // `computed` only carries the discrepant token entries; callers who
+        // need the full computed stats for every token should call
+        // `recompute_protocol_stats_chunk` in pages instead.
+        let computed = ProtocolStats {
+            active_will_count: computed_active_count,
+            total_locked_by_token: discrepancies,
+        };
         ProtocolStatsAudit {
             stored,
             computed,
@@ -2846,10 +3117,15 @@ impl WillContract {
     /// Repairs bookkeeping drift (#441) by overwriting the stored protocol
     /// stats with the values recomputed from storage, and returns them.
     ///
-    /// Callable by anyone: the written values are derived purely from
-    /// on-chain will state, so a caller cannot influence them. Tokens whose
-    /// recomputed total is zero are dropped from the stored list.
-    pub fn repair_protocol_stats(env: Env) -> ProtocolStats {
+    /// Requires the caller to authenticate (`caller.require_auth()`). Although
+    /// the written values are derived purely from on-chain will state and a
+    /// caller cannot influence them, the full storage walk triggered by this
+    /// function is expensive and unmetered; requiring auth prevents anonymous
+    /// DoS griefing (#55).
+    ///
+    /// Tokens whose recomputed total is zero are dropped from the stored list.
+    pub fn repair_protocol_stats(env: Env, caller: Address) -> ProtocolStats {
+        caller.require_auth();
         let computed = storage::recompute_protocol_stats(&env);
         let mut total_locked_by_token = Vec::new(&env);
         for entry in computed.total_locked_by_token.iter() {
@@ -3057,20 +3333,16 @@ impl WillContract {
     ) -> WillPage {
         let ids = storage::get_owner_wills(&env, &owner);
         let page_size = limit.min(storage::MAX_PAGE_SIZE);
-        let mut wills = Vec::new(&env);
         let cursor_val = cursor.unwrap_or(0);
         let skip = cursor.is_some();
-        let mut skipping = skip;
 
+        // #56: Single pass over storage. Collect every matching will in one
+        // loop so total_count and the current page are computed together,
+        // halving the number of persistent-storage reads compared to the
+        // previous two-loop implementation.
+        let mut all_matching: Vec<Will> = Vec::new(&env);
+        let mut skipping = skip;
         for id in ids.iter() {
-            // Check the page size *before* considering another will, exactly
-            // like `storage::paginate_ids` does: with `limit == 0` the loop
-            // exits immediately and the page comes back empty, instead of
-            // collecting one will before a post-push size check could stop it
-            // (#360).
-            if wills.len() >= page_size {
-                break;
-            }
             if skipping {
                 if id <= cursor_val {
                     continue;
@@ -3082,20 +3354,37 @@ impl WillContract {
                 Err(e) => panic_with_error!(&env, e),
             };
             if will.status == status {
-                wills.push_back(will);
+                all_matching.push_back(will);
             }
         }
 
-        // Count total matching wills for pagination
-        let mut total_count = 0;
-        for id in ids.iter() {
-            let will = match storage::load_will(&env, id) {
-                Ok(w) => w,
-                Err(_) => continue,
-            };
-            if will.status == status {
-                total_count += 1;
+        // Now compute total_count across the full owner index (before cursor).
+        // We need to walk ids that were skipped above as well, so do a cheap
+        // second pass over only the skipped portion of the id list.
+        let mut pre_cursor_count: u32 = 0;
+        if skip {
+            for id in ids.iter() {
+                if id > cursor_val {
+                    break;
+                }
+                let will = match storage::load_will(&env, id) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+                if will.status == status {
+                    pre_cursor_count += 1;
+                }
             }
+        }
+        let total_count = pre_cursor_count + all_matching.len();
+
+        // Take at most page_size wills for the response.
+        let mut wills: Vec<Will> = Vec::new(&env);
+        for will in all_matching.iter() {
+            if wills.len() >= page_size {
+                break;
+            }
+            wills.push_back(will);
         }
 
         let next_cursor = if wills.len() >= page_size {
@@ -3376,7 +3665,11 @@ impl WillContract {
         // restart the check-in clock (#373) -- same rule `emergency_checkin`
         // enforces, so a guardian quorum and the owner are held to one deadline.
         let trigger_time = will.trigger_time.unwrap_or(0);
-        let grace_deadline = checked_add_timestamp(&env, trigger_time, checked_days_to_seconds(&env, will.grace_period_days));
+        let grace_deadline = checked_add_timestamp(
+            &env,
+            trigger_time,
+            checked_days_to_seconds(&env, will.grace_period_days),
+        );
         if now > grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
@@ -3431,6 +3724,13 @@ impl WillContract {
             // starts clean if the will is ever triggered again.
             storage::reset_guardian_votes(&env, &will);
 
+            storage::transition_owner_status_index(
+                &env,
+                &will.owner,
+                WillStatus::Triggered,
+                WillStatus::Active,
+                will_id,
+            );
             will.status = WillStatus::Active;
             will.trigger_time = None;
             will.last_checkin = now;
@@ -3670,14 +3970,18 @@ impl WillContract {
     /// before they can vote on it, so consent recorded on the source will does
     /// not carry over (#375).
     ///
-    /// The source will must be `Active` or `Triggered`. Cloning is
-    /// deliberately *not* allowed from a `Cancelled`, `Released`, or
-    /// `Settled` source: an owner who let a will resolve to one of those
-    /// terminal states may have done so specifically because the
-    /// beneficiary/guardian configuration no longer reflects their wishes
-    /// (e.g. cancelling because a beneficiary is no longer trusted), and
-    /// silently letting that configuration be reused as a template for a
-    /// brand-new, separately-funded will would be surprising. Callers who
+    /// The source will must be `Active`. Cloning is deliberately *not*
+    /// allowed from a `Triggered`, `Cancelled`, `Released`, or `Settled`
+    /// source. A `Triggered` will is in the middle of a grace period: its
+    /// owner has missed a check-in and may be inactive. Permitting a clone
+    /// from that state would let a compromised key escape inactivity
+    /// detection by spinning up a fresh `Active` will without performing an
+    /// `emergency_checkin` (#53). Terminal states (`Cancelled`, `Released`,
+    /// `Settled`) are excluded because an owner who let a will reach one of
+    /// those states may have done so because the beneficiary/guardian
+    /// configuration no longer reflects their wishes (e.g. cancelling
+    /// because a beneficiary is no longer trusted), and silently reusing
+    /// that configuration as a template would be surprising. Callers who
     /// want to reuse an old configuration from a terminal will must supply
     /// the beneficiary/guardian lists to [`create_will`] directly, which
     /// forces a conscious re-entry of the data instead of an implicit copy.
@@ -3698,8 +4002,7 @@ impl WillContract {
     ///
     /// # Panics
     /// - [`WillError::WillNotFound`] if the source will does not exist.
-    /// - [`WillError::WillNotActive`] if the source will is not `Active` or
-    ///   `Triggered`.
+    /// - [`WillError::WillNotActive`] if the source will is not `Active` (#53).
     /// - [`WillError::ZeroAmount`] if any token amount is not positive.
     /// - [`WillError::InvalidTokenCount`] if the token list is empty or too large.
     /// - [`WillError::FixedAmountExceedsBalance`] if the source's
@@ -3718,7 +4021,11 @@ impl WillContract {
         }
 
         let source = load_will(&env, source_will_id);
-        if source.status != WillStatus::Active && source.status != WillStatus::Triggered {
+        // #53: only Active wills may be cloned. A Triggered will is mid
+        // grace-period; allowing clones from it would let a hot wallet
+        // circumvent inactivity detection by spinning up a fresh Active will
+        // without performing an emergency_checkin.
+        if source.status != WillStatus::Active {
             panic_with_error!(&env, WillError::WillNotActive);
         }
 
@@ -3739,6 +4046,17 @@ impl WillContract {
         // this cheap in-contract check, not after the token transfer below
         // has already succeeded (#51).
         storage::assert_index_capacity(&env, &owner, &source.beneficiaries);
+
+        // #54: Reject duplicate token addresses before any transfer, matching
+        // the same guard in `create_will`. Duplicates would cause the legacy
+        // `balance` mirror to disagree with the accumulated `balances` map.
+        let mut seen_tokens: Vec<Address> = Vec::new(&env);
+        for (token_addr, _) in tokens.iter() {
+            if seen_tokens.contains(&token_addr) {
+                panic_with_error!(&env, WillError::DuplicateToken);
+            }
+            seen_tokens.push_back(token_addr);
+        }
 
         // Build balances map and transfer tokens from the owner.
         let mut balances: Map<Address, i128> = Map::new(&env);
@@ -3824,6 +4142,7 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::index_owner_status(&env, &owner, WillStatus::Active, will_id);
         storage::increment_active_will_count(&env);
         storage::adjust_locked_for_balances(&env, &will.balances, 1);
 
@@ -4035,6 +4354,7 @@ impl WillContract {
             };
             storage::save_will(&env, &will);
             storage::index_by_owner(&env, &owner, will_id);
+            storage::index_owner_status(&env, &owner, will.status, will_id);
             storage::increment_active_will_count(&env);
             storage::adjust_locked_for_balances(&env, &will.balances, 1);
 
@@ -4385,9 +4705,14 @@ impl WillContract {
         // Decrement active will count since will_b is now cancelled
         storage::decrement_active_will_count(&env);
 
-        // Drop will_b from the owner index now that it is a terminal,
-        // zeroed-out placeholder — otherwise get_wills_by_owner keeps
-        // surfacing it alongside the surviving will_a indefinitely.
+        // Drop will_b from the owner status index and owner index now that it
+        // is a terminal, zeroed-out placeholder.
+        storage::remove_owner_status_index(
+            &env,
+            &owner,
+            WillStatus::Active,
+            will_id_b,
+        );
         storage::remove_owner_index(&env, &owner, will_id_b);
 
         // Save both wills
@@ -4583,6 +4908,11 @@ impl WillContract {
     ///   that have already been archived).
     /// - [`WillError::WillNotSettled`] if the will is not `Released`,
     ///   `Cancelled` or `Settled`.
+    /// - [`WillError::UnclaimedHashedBeneficiary`] if the will is `Released`
+    ///   and still contains hashed beneficiaries whose shares have not been
+    ///   claimed via `reveal_and_claim`. Archiving would delete the persistent
+    ///   will entry that `reveal_and_claim` depends on, permanently trapping
+    ///   those reserved funds (#1).
     pub fn archive_will(env: Env, will_id: u64) {
         let will = load_will(&env, will_id);
         // `Settled` is terminal too: `close_will` moves a `Released` will to
@@ -4594,6 +4924,16 @@ impl WillContract {
             && will.status != WillStatus::Settled
         {
             panic_with_error!(&env, WillError::WillNotSettled);
+        }
+
+        // Block archival while any hashed beneficiary share is still unclaimed
+        // on a Released will. `reveal_and_claim` loads the will by id to verify
+        // the commitment; if archival removed that entry first, those funds would
+        // be trapped in the contract with no retrieval path (#1).
+        if will.status == WillStatus::Released
+            && unclaimed_hashed_bps(&will.hashed_beneficiaries) > 0
+        {
+            panic_with_error!(&env, WillError::UnclaimedHashedBeneficiary);
         }
 
         let reason = match will.status {
@@ -4897,6 +5237,7 @@ impl WillContract {
         };
         storage::save_will(&env, &child);
         storage::index_by_owner(&env, &source.owner, new_id);
+        storage::index_owner_status(&env, &source.owner, WillStatus::Active, new_id);
         // The child is a new live will. Its balance moved out of the source,
         // so the locked totals are unchanged. The source was already counted
         // as active, so this nets +1 live will for the child alone (#7).
@@ -5302,33 +5643,6 @@ fn grace_period_end(env: &Env, will: &Will) -> u64 {
         Some(deadline) => deadline,
         None => panic_with_error!(env, WillError::InvalidPeriod),
     }
-}
-
-/// Compares two `ProtocolStats` by value, treating a missing token as a zero
-/// total and ignoring token order.
-fn stats_match(a: &ProtocolStats, b: &ProtocolStats) -> bool {
-    if a.active_will_count != b.active_will_count {
-        return false;
-    }
-    let total_of = |stats: &ProtocolStats, token: &Address| -> i128 {
-        for entry in stats.total_locked_by_token.iter() {
-            if entry.token == *token {
-                return entry.total_locked;
-            }
-        }
-        0
-    };
-    for entry in a.total_locked_by_token.iter() {
-        if total_of(b, &entry.token) != entry.total_locked {
-            return false;
-        }
-    }
-    for entry in b.total_locked_by_token.iter() {
-        if total_of(a, &entry.token) != entry.total_locked {
-            return false;
-        }
-    }
-    true
 }
 
 /// Loads a will by id, panicking with [`WillError::WillNotFound`] if it does not exist.
@@ -5801,8 +6115,11 @@ fn assert_valid_guardians(env: &Env, owner: &Address, guardians: &Vec<Address>) 
 
 /// Filters `owner`'s wills by `status` and cuts one page from the matches.
 ///
-/// Every indexed will is inspected so `total_count` is exact; the owner index
-/// is capped at `storage::MAX_WILLS_PER_INDEX`, which bounds the cost.
+/// Uses the [`storage::DataKey::OwnerStatusWills`] per-status index (#77) so
+/// the lookup is `O(|wills in status|)` rather than `O(|all owner wills|)`.
+/// The index is maintained at every status transition, so it is always an
+/// exact reflection of the live wills in that status — `total_count` is still
+/// exact, and no full will load is required just to filter by status.
 fn wills_by_owner_and_status_page(
     env: &Env,
     owner: &Address,
@@ -5812,24 +6129,24 @@ fn wills_by_owner_and_status_page(
 ) -> WillPage {
     let page_size = limit.min(storage::MAX_PAGE_SIZE);
     let cursor_val = cursor.unwrap_or(0);
-    let ids = storage::get_owner_wills(env, owner);
+
+    // Use the per-status index so we only touch the subset of will ids that
+    // currently carry `status`, not every will the owner has ever created.
+    let ids = storage::get_owner_status_wills(env, owner, status);
 
     let mut wills = Vec::new(env);
     let mut total_count: u32 = 0;
     let mut has_more = false;
     for id in ids.iter() {
-        let will = match storage::load_will(env, id) {
-            Ok(w) => w,
-            Err(e) => panic_with_error!(env, e),
-        };
-        if will.status != status {
-            continue;
-        }
         total_count += 1;
         if id <= cursor_val {
             continue;
         }
         if wills.len() < page_size {
+            let will = match storage::load_will(env, id) {
+                Ok(w) => w,
+                Err(e) => panic_with_error!(env, e),
+            };
             wills.push_back(will);
         } else {
             has_more = true;
@@ -5899,13 +6216,6 @@ fn grace_deadline(env: &Env, will: &Will) -> u64 {
     let grace_seconds = checked_days_to_seconds(env, will.grace_period_days);
     checked_add_timestamp(env, start, grace_seconds)
 }
-
-/// Counts the live votes on `will` and returns `(vote_count, vote_weight)`.
-/// A vote is live only if it was cast by a guardian on the *current* list who
-/// has accepted the role and whose vote has not expired.
-///
-/// `has_voted` selects the namespace: [`storage::has_guardian_voted`] for
-/// release votes or [`storage::has_guardian_cancel_voted`] for cancel votes.
 
 /// Asserts both periods are at least one day and at most [`MAX_PERIOD_DAYS`].
 ///
@@ -5986,21 +6296,31 @@ fn collect_proportional_bounties(plan: &mut Map<Address, i128>, will: &Will) {
 ///    each token by basis point. The last percentage beneficiary absorbs the
 ///    integer-division remainder, so no dust is left behind (#190).
 ///
-/// # Rounding
+/// # Rounding and dust remainder semantics (#32)
 ///
-/// Each token's distribution is calculated as
-/// `share = balance * (basis_points / 10_000)`. Integer division truncates
-/// toward zero, which may result in zero shares for beneficiaries with very
-/// small calculated amounts: distributing 9 units equally among 10
-/// beneficiaries (900 bp each) gives each 0.9 units, which truncates to 0.
-/// The remainder is paid to the final percentage beneficiary, which
-/// guarantees the full balance of every token is always distributed.
+/// Each token's proportional share for the first `N - 1` percentage
+/// beneficiaries is calculated via [`proportional_share`] as
+/// `floor(remaining * basis_points / 10_000)`. Integer division truncates
+/// toward zero, leaving a rounding remainder of at most `N - 1` stroops per
+/// token.
+///
+/// The final `Allocation::Percentage` beneficiary in `will.beneficiaries`
+/// deterministically receives `percentage_remaining` (their proportional share
+/// plus any sub-stroop truncation dust) for every token held by the will. This
+/// deterministic convention avoids per-token hashing or sorting overhead at
+/// release time while strictly guaranteeing 100% balance conservation with
+/// zero dust stranded in the contract. Because the final percentage
+/// beneficiary absorbs the rounding surplus across all tokens, client UIs and
+/// SDK callers that care about dust ordering on tiny or low-decimal balances
+/// should treat the final percentage slot as the remainder recipient.
 ///
 /// **Note:** Callers should ensure that the will's balance is sufficient to
 /// give each beneficiary at least 1 unit of their share. Extremely small
-/// balances relative to beneficiary counts can result in most recipients
-/// getting zero after rounding. Consider validating a minimum will amount at
-/// creation time (see issue #37).
+/// balances relative to beneficiary counts (e.g. distributing 9 units equally
+/// among 10 beneficiaries at 900 bp each, where `floor(0.9) == 0`) can result
+/// in earlier recipients getting zero after truncation while the final
+/// percentage beneficiary receives the remainder. Consider validating a
+/// minimum will amount at creation time (see issue #37).
 ///
 /// # Leftover value
 ///
@@ -6165,7 +6485,13 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                 if let Allocation::FixedAmount(amt) = beneficiary.allocation {
                     let share = amt.min(remaining).max(0);
                     remaining -= share;
-                    shares.push_back((beneficiary.address.clone(), share));
+                    // Guard zero-value shares: some SEP-41 tokens reject a
+                    // transfer(0) call, which would abort the whole release.
+                    // Skip beneficiaries whose share rounds to zero rather
+                    // than queuing a zero transfer (#73).
+                    if share > 0 {
+                        shares.push_back((beneficiary.address.clone(), share));
+                    }
                 }
             }
         }
@@ -6185,7 +6511,13 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                     percentage_remaining -= portion;
                     portion
                 };
-                shares.push_back((beneficiary.address.clone(), share));
+                // Guard zero-value shares: some SEP-41 tokens reject a
+                // transfer(0) call, which would abort the whole release.
+                // Skip beneficiaries whose share rounds to zero rather than
+                // queuing a zero transfer (#73).
+                if share > 0 {
+                    shares.push_back((beneficiary.address.clone(), share));
+                }
             }
         }
 
@@ -6239,11 +6571,52 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             Some(v) => v,
             None => panic_with_error!(env, WillError::DistributionMismatch),
         };
+        if let Some(reserve) = hashed_reserves.get(token_addr.clone()) {
+            planned = match planned.checked_add(reserve) {
+                Some(v) => v,
+                None => panic_with_error!(env, WillError::DistributionMismatch),
+            };
+        }
         if planned != total {
             panic_with_error!(env, WillError::DistributionMismatch);
         }
 
         transfer_plan.push_back((token_addr, shares));
+    }
+
+    // --- PRE-FLIGHT: verify the contract's actual vault balance covers each
+    // planned payout before committing any state (#74).
+    //
+    // `distribute` assumes internal accounting is sound, but external
+    // insolvency — a hacked token, accounting corruption, or a fee-on-
+    // transfer token deposited in error — could make the real vault balance
+    // lower than `will.balances[token]`. If that happens, the first
+    // beneficiary transfer succeeds, the second runs short, and the whole
+    // distribution is aborted mid-flight by the token contract. Because state
+    // was already committed (status = Released, balances cleared) the will is
+    // stuck: it looks released but nobody can receive their inheritance.
+    //
+    // Checking up-front lets the call abort cleanly with `DistributionMismatch`
+    // before any state is mutated, keeping the will actionable (its status
+    // stays Active/Triggered and a caller can retry or cancel once the
+    // insolvency is resolved).
+    //
+    // The check reads the vault's *current* real balance (one cross-contract
+    // read per token) and compares it against the *total* this distribution
+    // intends to pay out for that token.  `will.balances[token]` is exactly
+    // that total: it has not yet been mutated and is the same value whose
+    // conservation was verified by the per-token `planned == total` check above.
+    {
+        let contract_address = env.current_contract_address();
+        for (token_addr, total) in will.balances.iter() {
+            if total == 0 {
+                continue;
+            }
+            let vault_balance = token::Client::new(env, &token_addr).balance(&contract_address);
+            if vault_balance < total {
+                panic_with_error!(env, WillError::DistributionMismatch);
+            }
+        }
     }
 
     // --- EFFECTS: mutate and persist all state before any external call ---
@@ -6255,6 +6628,12 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
     // it has now either been paid out or never held anything to reserve.
     will.balances = hashed_reserves;
     will.balance = will.balances.get(will.token.clone()).unwrap_or(0);
+
+    // Move the will out of its current status bucket (Active or Triggered)
+    // into Released, then prune the owner status index since released wills
+    // are removed from the owner index entirely (#71).
+    storage::remove_owner_status_index_all(env, &will.owner, will.id);
+    storage::index_owner_status(env, &will.owner, WillStatus::Released, will.id);
     will.status = WillStatus::Released;
 
     // Prune stale index entries (#71): remove the released will from the

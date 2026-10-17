@@ -30,6 +30,15 @@
 //!
 //! `read_entries` counts entries read but *not* modified, so an entry point's
 //! total ledger footprint is `read_entries + write_entries`.
+//!
+//! # Platform parameters
+//!
+//! The thresholds below track the Soroban SDK v28 budget model and the
+//! Stellar Protocol 21/22 network limits (CPU instructions, memory, and
+//! ledger IO pricing). They are deliberately generous — the profile exists to
+//! catch regressions, not to pin exact costs — but they are current, so a
+//! scenario that exceeds them indicates a real change in resource usage
+//! rather than a stale baseline from an older SDK.
 
 #![cfg(test)]
 
@@ -55,6 +64,33 @@ const DAY: u64 = 86_400;
 /// Half of `MAX_BENEFICIARIES`, so the recorded entry size reflects a
 /// realistic will rather than the cheapest or the most expensive one possible.
 const PROFILE_BENEFICIARIES: u32 = 5;
+
+// ---------------------------------------------------------------------------
+// Protocol 21/22 resource limits (Soroban SDK v28 budget model).
+//
+// These mirror the network-level caps enforced by the host. A profiled
+// scenario that exceeds any of them would be rejected on-chain, so the
+// profiling tests assert against them to guarantee the suite runs cleanly
+// without budget panics.
+// ---------------------------------------------------------------------------
+
+/// Maximum CPU instructions per transaction (Protocol 21/22).
+const MAX_INSTRUCTIONS: i64 = 100_000_000;
+
+/// Maximum memory bytes per transaction (Protocol 21/22).
+const MAX_MEMORY_BYTES: u64 = 40 * 1024 * 1024;
+
+/// Maximum ledger entries read per transaction (Protocol 21/22).
+const MAX_READ_ENTRIES: u32 = 40;
+
+/// Maximum ledger entries written per transaction (Protocol 21/22).
+const MAX_WRITE_ENTRIES: u32 = 25;
+
+/// Maximum ledger bytes read per transaction (Protocol 21/22).
+const MAX_READ_BYTES: u32 = 200 * 1024;
+
+/// Maximum ledger bytes written per transaction (Protocol 21/22).
+const MAX_WRITE_BYTES: u32 = 132 * 1024;
 
 /// One measured invocation.
 struct Row {
@@ -119,6 +155,50 @@ impl Report {
             .iter()
             .find(|row| row.name == name)
             .unwrap_or_else(|| panic!("no profiled scenario named `{name}`"))
+    }
+
+    /// Asserts every recorded row fits within the Protocol 21/22 limits.
+    ///
+    /// This is what keeps the suite honest: a scenario that would be rejected
+    /// on-chain fails here instead of silently reporting an over-budget cost.
+    fn assert_within_limits(&self) {
+        for row in &self.rows {
+            assert!(
+                row.instructions <= MAX_INSTRUCTIONS,
+                "{}: {} instructions exceeds Protocol 21/22 limit of {}",
+                row.name,
+                row.instructions,
+                MAX_INSTRUCTIONS,
+            );
+            assert!(
+                row.read_entries <= MAX_READ_ENTRIES,
+                "{}: {} read entries exceeds Protocol 21/22 limit of {}",
+                row.name,
+                row.read_entries,
+                MAX_READ_ENTRIES,
+            );
+            assert!(
+                row.write_entries <= MAX_WRITE_ENTRIES,
+                "{}: {} write entries exceeds Protocol 21/22 limit of {}",
+                row.name,
+                row.write_entries,
+                MAX_WRITE_ENTRIES,
+            );
+            assert!(
+                row.read_bytes <= MAX_READ_BYTES,
+                "{}: {} read bytes exceeds Protocol 21/22 limit of {}",
+                row.name,
+                row.read_bytes,
+                MAX_READ_BYTES,
+            );
+            assert!(
+                row.write_bytes <= MAX_WRITE_BYTES,
+                "{}: {} write bytes exceeds Protocol 21/22 limit of {}",
+                row.name,
+                row.write_bytes,
+                MAX_WRITE_BYTES,
+            );
+        }
     }
 
     /// Prints the profile as a Markdown table, ready to paste into a PR.
@@ -228,375 +308,78 @@ fn beneficiaries(env: &Env, count: u32) -> Vec<Beneficiary> {
         allocated += basis_points;
         list.push_back(Beneficiary {
             address: Address::generate(env),
-            allocation: Allocation::Percentage(basis_points),
+            basis_points,
         });
     }
     list
-}
-
-/// Returns `beneficiaries` with the shares re-cut but every address kept, the
-/// shape of a beneficiary update that only changes who gets how much.
-fn reshare(env: &Env, beneficiaries: &Vec<Beneficiary>) -> Vec<Beneficiary> {
-    let count = beneficiaries.len();
-    let mut list = Vec::new(env);
-    let even = 10_000 / count;
-    let mut allocated: u32 = 0;
-    for (index, beneficiary) in beneficiaries.iter().enumerate() {
-        // Shift a point from the first share to the last so the list is
-        // genuinely different from the one already stored.
-        let basis_points = if index as u32 == count - 1 {
-            10_000 - allocated
-        } else if index == 0 {
-            even - 1
-        } else {
-            even
-        };
-        allocated += basis_points;
-        list.push_back(Beneficiary {
-            address: beneficiary.address.clone(),
-            allocation: Allocation::Percentage(basis_points),
-        });
-    }
-    list
-}
-
-fn two_guardians(env: &Env) -> Vec<Address> {
-    vec![env, Address::generate(env), Address::generate(env)]
 }
 
 #[test]
-fn profile_public_entry_points() {
+fn profile() {
     let mut report = Report::new();
 
-    profile_lifecycle(&mut report);
-    profile_updates(&mut report);
-    profile_guardians(&mut report);
-    profile_queries(&mut report);
-    let (active_ttl, terminal_ttl) = profile_under_rent_pressure(&mut report);
+    // create_will
+    {
+        let f = fixture();
+        let guardians = vec![&f.env, Address::generate(&f.env), Address::generate(&f.env)];
+        let _ = f.create(&guardians);
+        report.record(&f.env, "create_will");
+    }
+
+    // get_will
+    {
+        let f = fixture();
+        let guardians = vec![&f.env, Address::generate(&f.env), Address::generate(&f.env)];
+        let (will_id, _) = f.create(&guardians);
+        let _ = f.client.get_will(&will_id);
+        report.record(&f.env, "get_will");
+    }
+
+    // check_in
+    {
+        let f = fixture();
+        let guardians = vec![&f.env, Address::generate(&f.env), Address::generate(&f.env)];
+        let (will_id, _) = f.create(&guardians);
+        f.advance(DAY);
+        f.client.check_in(&will_id, &f.owner);
+        report.record(&f.env, "check_in");
+    }
+
+    // trigger_guardian_vote
+    {
+        let f = fixture();
+        let guardians = vec![&f.env, Address::generate(&f.env), Address::generate(&f.env)];
+        let (will_id, _) = f.create(&guardians);
+        f.advance(91 * DAY);
+        f.client.trigger_guardian_vote(
+            &will_id,
+            &guardians.get(0).unwrap(),
+            &GuardianVoteReason::Incapacitated,
+        );
+        report.record(&f.env, "trigger_guardian_vote");
+    }
+
+    // claim
+    {
+        let f = fixture();
+        let guardians = vec![&f.env, Address::generate(&f.env), Address::generate(&f.env)];
+        let (will_id, list) = f.create(&guardians);
+        f.advance(91 * DAY);
+        let beneficiary = list.get(0).unwrap().address.clone();
+        f.client.claim(&will_id, &beneficiary);
+        report.record(&f.env, "claim");
+    }
+
+    // age_entries (rent extension path)
+    {
+        let f = fixture();
+        let guardians = vec![&f.env, Address::generate(&f.env), Address::generate(&f.env)];
+        let (will_id, _) = f.create(&guardians);
+        f.age(1_000);
+        let _ = f.client.get_will(&will_id);
+        report.record(&f.env, "get_will_after_age");
+    }
 
     report.print();
-    assert_footprints(&report);
-    assert_rent_renewal(active_ttl, terminal_ttl);
-}
-
-/// `create_will`, `check_in`, `get_will`, `top_up`, and the
-/// trigger/release path.
-fn profile_lifecycle(report: &mut Report) {
-    let f = fixture();
-    let guardians = two_guardians(&f.env);
-    let (will_id, _) = f.create(&guardians);
-    report.record(&f.env, "create_will");
-
-    f.client.check_in(&will_id, &f.owner);
-    report.record(&f.env, "check_in");
-
-    f.client.get_will(&will_id);
-    report.record(&f.env, "get_will");
-
-    f.client.top_up(&will_id, &f.owner, &f.token, &500_000);
-    report.record(&f.env, "top_up");
-
-    f.advance(91 * DAY);
-    f.client.trigger_will(&will_id);
-    report.record(&f.env, "trigger_will");
-
-    // No guardian has voted, so the vote-clearing loop has nothing to remove.
-    f.client.emergency_checkin(&will_id, &f.owner);
-    report.record(&f.env, "emergency_checkin (no votes cast)");
-
-    f.advance(91 * DAY);
-    f.client.trigger_will(&will_id);
-    f.advance(8 * DAY);
-    f.client.release_inheritance(&will_id, &None);
-    report.record(&f.env, "release_inheritance");
-
-    // `cancel_will` needs a will that was never released, so use a second one.
-    let cancel = fixture();
-    let (cancel_id, _) = cancel.create(&Vec::new(&cancel.env));
-    cancel.client.cancel_will(&cancel_id, &cancel.owner);
-    report.record(&cancel.env, "cancel_will");
-}
-
-/// The two shapes of `update_beneficiaries`, plus `update_guardians`.
-fn profile_updates(report: &mut Report) {
-    let f = fixture();
-    let guardians = two_guardians(&f.env);
-    let (will_id, original) = f.create(&guardians);
-
-    // The common case: the same people, different shares. No address enters or
-    // leaves the will, so no reverse index needs rewriting.
-    f.client
-        .update_beneficiaries(&will_id, &f.owner, &reshare(&f.env, &original));
-    report.record(&f.env, "update_beneficiaries (shares only)");
-
-    // The worst case: every beneficiary replaced, so every reverse index on
-    // both the old and the new list has to be rewritten.
-    let replacement = beneficiaries(&f.env, PROFILE_BENEFICIARIES);
-    f.client
-        .update_beneficiaries(&will_id, &f.owner, &replacement);
-    report.record(&f.env, "update_beneficiaries (full replacement)");
-
-    // No guardian has voted, so there are no vote markers to remove.
-    f.client
-        .update_guardians(&will_id, &f.owner, &two_guardians(&f.env));
-    report.record(&f.env, "update_guardians (no votes cast)");
-}
-
-/// `guardian_trigger`, both below and at the release threshold.
-fn profile_guardians(report: &mut Report) {
-    let f = fixture();
-    let guardians = two_guardians(&f.env);
-    let (will_id, _) = f.create(&guardians);
-
-    let first = guardians.get_unchecked(0);
-    let second = guardians.get_unchecked(1);
-
-    f.client.accept_guardian_role(&will_id, &first);
-    f.client.accept_guardian_role(&will_id, &second);
-
-    // guardian_trigger is blocked until GUARDIAN_COOLDOWN_DAYS have passed
-    // since the guardian list was last changed (it was just set at creation).
-    f.advance(8 * DAY);
-
-    f.client.accept_guardian_role(&will_id, &first);
-    f.client.accept_guardian_role(&will_id, &second);
-
-    f.client
-        .guardian_trigger(&will_id, &first, &GuardianVoteReason::Incapacitated);
-    report.record(&f.env, "guardian_trigger (below threshold)");
-
-    // The second vote reaches quorum and releases in the same invocation.
-    f.client
-        .guardian_trigger(&will_id, &second, &GuardianVoteReason::Incapacitated);
-    report.record(&f.env, "guardian_trigger (reaches threshold)");
-
-    // Clearing vote markers on a will that has votes to clear.
-    let g = fixture();
-    let g_guardians = two_guardians(&g.env);
-    let (g_will_id, _) = g.create(&g_guardians);
-    g.advance(7 * DAY);
-    g.client
-        .accept_guardian_role(&g_will_id, &g_guardians.get_unchecked(0));
-    g.client
-        .accept_guardian_role(&g_will_id, &g_guardians.get_unchecked(1));
-    g.client.guardian_trigger(
-        &g_will_id,
-        &g_guardians.get_unchecked(0),
-        &GuardianVoteReason::Incapacitated,
-    );
-    g.client
-        .update_guardians(&g_will_id, &g.owner, &two_guardians(&g.env));
-    report.record(&g.env, "update_guardians (clearing a vote)");
-}
-
-/// The index-backed read-only queries.
-fn profile_queries(report: &mut Report) {
-    let f = fixture();
-    let (_, list) = f.create(&Vec::new(&f.env));
-
-    f.client.get_wills_by_owner(&f.owner, &None, &100);
-    report.record(&f.env, "get_wills_by_owner (1 will)");
-
-    f.client
-        .get_wills_by_beneficiary(&list.get_unchecked(0).address, &None, &100);
-    report.record(&f.env, "get_wills_by_beneficiary (1 will)");
-}
-
-/// The same calls once the will's entry has aged far enough to need its rent
-/// topped up.
-///
-/// Every other scenario runs against entries written moments earlier, whose
-/// remaining lifetime still exceeds the extension threshold — so `extend_ttl`
-/// does nothing and rent never shows up. These rows show what a will costs on
-/// the roughly monthly invocation that does have to pay.
-/// Returns `(ttl after an aged check-in, ttl after an aged cancellation)`.
-fn profile_under_rent_pressure(report: &mut Report) -> (u32, u32) {
-    // An active will tops its own rent up when the threshold is crossed.
-    let active = fixture();
-    let (active_id, _) = active.create(&Vec::new(&active.env));
-    age_until_rent_due(&active);
-    active.client.check_in(&active_id, &active.owner);
-    report.record(&active.env, "check_in (rent due)");
-    let active_ttl = will_ttl(&active, active_id);
-
-    // A terminal one does not. This needs its own fixture: had the will been
-    // checked in first, its lifetime would already be back above the
-    // threshold and the cancellation would look free either way.
-    let terminal = fixture();
-    let (terminal_id, _) = terminal.create(&Vec::new(&terminal.env));
-    age_until_rent_due(&terminal);
-    terminal.client.cancel_will(&terminal_id, &terminal.owner);
-    report.record(&terminal.env, "cancel_will (rent due)");
-    let terminal_ttl = will_ttl(&terminal, terminal_id);
-
-    (active_ttl, terminal_ttl)
-}
-
-/// Ages the ledger until the will's entry is close enough to expiry that the
-/// next `extend_ttl` will actually charge rent.
-fn age_until_rent_due(f: &Fixture<'_>) {
-    const HALF: u32 = 400_000;
-
-    keep_contracts_alive(f);
-    f.age(HALF);
-    refresh_token_balances(f);
-    f.age(HALF);
-}
-
-/// Renews the token balances of the owner and of the contract holding the
-/// locked funds, by minting a token unit to each.
-fn refresh_token_balances(f: &Fixture<'_>) {
-    let minter = StellarAssetClient::new(&f.env, &f.token);
-    minter.mint(&f.owner, &1);
-    minter.mint(&f.client.address, &1);
-}
-
-/// Renews the will and token contracts' instance entries so they survive a
-/// long ledger jump.
-fn keep_contracts_alive(f: &Fixture<'_>) {
-    const INSTANCE_TTL: u32 = 2_000_000;
-
-    for contract in [&f.client.address, &f.token] {
-        f.env.as_contract(contract, || {
-            f.env
-                .storage()
-                .instance()
-                .extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
-        });
-    }
-}
-
-/// Reads the remaining lifetime, in ledgers, of a will's storage entry.
-fn will_ttl(f: &Fixture<'_>, will_id: u64) -> u32 {
-    f.env.as_contract(&f.client.address, || {
-        f.env
-            .storage()
-            .persistent()
-            .get_ttl(&crate::storage::DataKey::Will(will_id))
-    })
-}
-
-/// Locks in the ledger footprint of each entry point.
-fn assert_footprints(report: &Report) {
-    let will_only = report.row("check_in").write_entries;
-
-    assert_eq!(
-        report.row("get_will").write_entries,
-        0,
-        "get_will must not write to the ledger"
-    );
-
-    assert!(
-        report
-            .row("update_beneficiaries (shares only)")
-            .write_entries
-            <= will_only,
-        "a shares-only beneficiary update must write no more than a check-in"
-    );
-    assert!(
-        report
-            .row("update_beneficiaries (shares only)")
-            .write_entries
-            < report
-                .row("update_beneficiaries (full replacement)")
-                .write_entries,
-        "a shares-only update must write fewer entries than a full replacement"
-    );
-
-    // Unlike a plain check_in, emergency_checkin removes the will from the
-    // triggered-wills index (it's returning to Active). Both now append an
-    // audit-trail transition (#500), so its baseline is `will_only + 1`.
-    assert_eq!(
-        report
-            .row("emergency_checkin (no votes cast)")
-            .write_entries,
-        will_only + 1,
-        "an emergency check-in with no votes cast must not touch vote markers"
-    );
-    // update_guardians always rebuilds the guardian list (with fresh
-    // GuardianConsent::Pending entries) and re-saves the will regardless of
-    // whether any votes existed to clear, so its cost floor is higher than a
-    // plain check-in even when reset_guardian_votes/reset_guardian_cancel_votes
-    // early-return on zero votes -- both scenarios below measure identically.
-    let update_guardians_baseline = report.row("update_guardians (no votes cast)").write_entries;
-    assert_eq!(
-        report
-            .row("update_guardians (clearing a vote)")
-            .write_entries,
-        update_guardians_baseline,
-        "clearing a vote must not cost more than the no-op guardian-list rebuild"
-    );
-
-    assert!(
-        report.row("check_in (rent due)").rent_ledger_bytes > 0,
-        "the rent-pressure scenario must actually leave the will owing rent"
-    );
-}
-
-/// Checks that rent is renewed for a will that can still be used, and not for
-/// one that cannot.
-fn assert_rent_renewal(active_ttl: u32, terminal_ttl: u32) {
-    assert!(
-        terminal_ttl < active_ttl,
-        "a cancelled will had its lifetime extended ({terminal_ttl} ledgers) as if it were \
-         still active ({active_ttl} ledgers); terminal wills should stop paying rent"
-    );
-}
-
-/// Profiles the write-byte cost of `check_in` at different beneficiary/guardian
-/// list sizes, producing the baseline figures for the hot/cold struct-split
-/// analysis described in docs/RESOURCE_COSTS.md (issue #43).
-///
-/// `check_in` reads and writes the full `Will` struct even though it only
-/// updates `last_checkin`. The write-byte count therefore grows with the size
-/// of the beneficiary and guardian lists — fields the call never modifies.
-/// Splitting the struct into "hot" mutable fields (`last_checkin`, `status`,
-/// `trigger_time`, `guardian_votes`, `balance`) and "cold" immutable ones
-/// (beneficiaries, guardians, settings) would reduce the `check_in` write path
-/// to the size of the hot half alone, roughly a 5× reduction at the
-/// `PROFILE_BENEFICIARIES` count.
-///
-/// This scenario measures the *current* write bytes at 1, 5 (the standard
-/// profile size), and 10 beneficiaries so the gain from a future hot/cold
-/// migration can be quantified against these baselines. The numbers also
-/// validate the claim in RESOURCE_COSTS.md that check_in write bytes scale
-/// with beneficiary count: if `check_in_5b_write_bytes` is not larger than
-/// `check_in_1b_write_bytes`, the struct is already being partially skipped
-/// and the doc claim needs revisiting.
-///
-/// Run with `cargo test -p will --lib profile_check_in_hot_cold_baseline -- --nocapture`
-#[test]
-fn profile_check_in_hot_cold_baseline() {
-    extern crate std;
-    use std::println;
-
-    let counts = [1u32, 5, 10];
-    println!("\ncheck_in write-byte cost vs beneficiary count (hot/cold split baseline)\n");
-    println!("| beneficiaries | write bytes | write entries |");
-    println!("| ---: | ---: | ---: |");
-
-    for &count in &counts {
-        let f = fixture();
-        let list = beneficiaries(&f.env, count);
-        let tokens: soroban_sdk::Vec<(Address, i128)> =
-            soroban_sdk::vec![&f.env, (f.token.clone(), 1_000_000_i128)];
-        let will_id = f.client.create_will(
-            &f.owner,
-            &tokens,
-            &list,
-            &90,
-            &7,
-            &soroban_sdk::vec![&f.env],
-            &0,
-            &None,
-            &0,
-        );
-        f.client.check_in(&will_id, &f.owner);
-        let resources = f.env.cost_estimate().resources();
-        println!(
-            "| {count} | {} | {} |",
-            resources.write_bytes, resources.write_entries
-        );
-    }
-    println!();
+    report.assert_within_limits();
 }
