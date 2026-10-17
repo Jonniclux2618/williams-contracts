@@ -425,3 +425,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-97 -->
 - #97: Symmetric Threshold for Cancel-Trigger Disincentivizes Guardian Emergency Interventions
+
+<!-- handsoff-issue-98 -->
+- #98: Lack of Batch Guardian Consent Mechanism Multiplies Multi-Party Onboarding Costs
