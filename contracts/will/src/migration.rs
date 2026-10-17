@@ -55,6 +55,29 @@ use crate::types::Will;
 /// asserted equal at compile time in `migrate_will_test.rs`.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
+/// `true` when this build is a pre-release (release candidate) of the
+/// contract, `false` for a final build. See the module docs for how this
+/// combines with `CONTRACT_VERSION` to identify an RC build.
+pub const CONTRACT_PRERELEASE: bool = false;
+
+/// Pre-release candidate number for this build (`1` for `rc.1`), or `0` when
+/// [`CONTRACT_PRERELEASE`] is `false`.
+pub const CONTRACT_PRERELEASE_NUM: u32 = 0;
+
+/// Packs a SemVer triple into the `u32` encoding used by `CONTRACT_VERSION`.
+///
+/// Each component must be below 1_000; larger values would overlap adjacent
+/// fields. This is the single source of truth for the encoding so the
+/// contract constant and its tests cannot drift apart.
+pub const fn encode_version(major: u32, minor: u32, patch: u32) -> u32 {
+    major * 1_000_000 + minor * 1_000 + patch
+}
+
+/// Splits a packed version back into `(major, minor, patch)`.
+pub const fn decode_version(version: u32) -> (u32, u32, u32) {
+    (version / 1_000_000, (version / 1_000) % 1_000, version % 1_000)
+}
+
 /// Legacy `Will` layouts, frozen at the version their successor replaced.
 ///
 /// A legacy struct is the **only** way an entry written by an older contract
@@ -191,4 +214,33 @@ fn migrate_v0_to_v1(_env: &Env, mut will: Will) -> Will {
 fn migrate_v1_to_v2(_env: &Env, mut will: Will) -> Will {
     will.schema_version = 2;
     will
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let packed = encode_version(1, 3, 0);
+        assert_eq!(packed, 1_003_000);
+        assert_eq!(decode_version(packed), (1, 3, 0));
+    }
+
+    #[test]
+    fn decode_handles_max_components() {
+        let packed = encode_version(999, 999, 999);
+        assert_eq!(decode_version(packed), (999, 999, 999));
+    }
+
+    #[test]
+    fn prerelease_flag_is_consistent() {
+        // A pre-release build must carry a candidate number; a final build
+        // must not. This is what client bindings rely on to detect RCs.
+        if CONTRACT_PRERELEASE {
+            assert!(CONTRACT_PRERELEASE_NUM >= 1);
+        } else {
+            assert_eq!(CONTRACT_PRERELEASE_NUM, 0);
+        }
+    }
 }
