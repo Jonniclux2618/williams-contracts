@@ -1,6 +1,7 @@
 //! Integration test that exercises the *compiled wasm artifact* through the
 //! real `stellar` CLI against a local Soroban network, as opposed to the
-//! in-process `soroban_sdk::Env::default()` unit tests in `src/test.rs`.
+//! in-process `soroban_sdk::Env::default()` unit tests in the modular test
+//! suite files under `src/`.
 //!
 //! This is `#[ignore]`-gated because it requires `stellar`, `docker`, and
 //! network access to spin up a local standalone network, none of which are

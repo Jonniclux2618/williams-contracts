@@ -38,5 +38,22 @@ fmt-check:
 audit:
     cargo audit --file Cargo.lock --deny warnings
 
+# Verify the exported contract spec is up to date (fails if stale).
+spec:
+    scripts/export-spec.sh --check
+
+# Profile resource costs of the contract entry points.
+costs:
+    scripts/check_resource_costs.sh
+
+# Deploy the contract to testnet.
+deploy-testnet:
+    scripts/deploy-testnet.sh
+
+# Run the `create_will` fuzz target. Requires cargo-fuzz:
+# `cargo install cargo-fuzz` and a nightly toolchain.
+fuzz-create:
+    cargo +nightly fuzz run create_will
+
 # Run everything CI runs, in order.
-ci: fmt-check lint test build
+ci: fmt-check lint test build spec

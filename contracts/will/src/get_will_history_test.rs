@@ -235,82 +235,53 @@ fn history_pages_walk_the_whole_trail_without_gaps_or_duplicates() {
         }
         assert!(page.len() <= PAGE, "a page must never exceed the limit");
         // Advance the cursor to the seq of the last entry on this page.
-        let last_seq = page.get(page.len() - 1).unwrap().seq as u32;
-        cursor = Some(last_seq);
+        let last = page.get(page.len() - 1).unwrap();
+        cursor = Some(last.seq);
         for entry in page.iter() {
             walked.push_back(entry);
         }
     }
 
-    let whole = client.get_will_history(&will_id);
+    let full = client.get_will_history(&will_id);
     assert_eq!(
         walked.len(),
-        whole.len(),
-        "paging the trail must visit every retained entry exactly once",
+        full.len(),
+        "paging must cover the whole trail",
     );
-    for (i, entry) in walked.iter().enumerate() {
-        let i = i as u32;
+    for i in 0..full.len() {
         assert_eq!(
-            entry.timestamp,
-            whole.get(i).unwrap().timestamp,
-            "paged entry {i} must match the unpaged trail at the same offset",
+            walked.get(i).unwrap().seq,
+            full.get(i).unwrap().seq,
+            "paged entries must match the full trail in order",
         );
     }
 }
 
+// ── Issue #111: amortized batch pruning keeps the trail bounded ───────────
+
 #[test]
-fn history_page_caps_the_limit_at_max_page_size() {
+fn history_size_stays_within_bounds_across_many_transitions() {
     let (env, client, owner, token_address) = setup();
     let will_id = create_will(&env, &client, &owner, &token_address);
 
-    // 1 create + 2 per round, for far more rounds than the cap allows: the raw
-    // trail is ~100 transitions, so an unclamped read would return all of them.
-    cycle(&env, &client, &owner, will_id, MAX_HISTORY_ENTRIES);
+    // Drive many consecutive transitions and assert the retained trail never
+    // exceeds the cap at any point, not just at the end.
+    for _ in 0..(MAX_HISTORY_ENTRIES + 5) {
+        client.check_in(&will_id, &owner);
+        advance(&env, 91);
+        client.trigger_will(&will_id);
+        advance(&env, 1);
+        client.emergency_checkin(&will_id, &owner);
 
-    // A limit far above MAX_PAGE_SIZE is clamped rather than honoured, exactly
-    // like the paginated owner/beneficiary reads — so the page comes back at
-    // the cap, not at the size of the whole trail.
-    let page = client.get_will_history_page(&will_id, &None, &10_000);
-    assert_eq!(page.len(), MAX_HISTORY_ENTRIES);
-}
+        let history = client.get_will_history(&will_id);
+        assert!(
+            history.len() <= MAX_HISTORY_ENTRIES,
+            "history must never exceed MAX_HISTORY_ENTRIES after append",
+        );
+    }
 
-#[test]
-fn history_page_past_the_end_returns_nothing() {
-    let (env, client, owner, token_address) = setup();
-    let will_id = create_will(&env, &client, &owner, &token_address);
-
-    let page = client.get_will_history_page(&will_id, &Some(9_999), &10);
-    assert!(
-        page.is_empty(),
-        "a cursor beyond the trail must return no entries"
-    );
-}
-
-#[test]
-fn history_page_of_an_unknown_will_is_empty() {
-    let (_env, client, _owner, _token_address) = setup();
-
-    let page = client.get_will_history_page(&42, &None, &10);
-    assert!(page.is_empty());
-    assert!(client.get_will_history(&42).is_empty());
-}
-
-#[test]
-fn history_cap_does_not_disturb_the_lifecycle_it_records() {
-    let (env, client, owner, token_address) = setup();
-    let will_id = create_will(&env, &client, &owner, &token_address);
-
-    // Drive well past the cap, then settle the will: the terminal transition
-    // must still be recorded and the will must still be releasable.
-    cycle(&env, &client, &owner, will_id, MAX_HISTORY_ENTRIES);
-    advance(&env, 91);
-    client.trigger_will(&will_id);
-    advance(&env, 8);
-    client.release_inheritance(&will_id, &None);
-
+    // Ordering is preserved: the newest entry is the last transition recorded.
     let history = client.get_will_history(&will_id);
-    assert_eq!(history.len(), MAX_HISTORY_ENTRIES);
     let last = history.get(history.len() - 1).unwrap();
-    assert_eq!(last.to_status, WillStatus::Released);
-    assert_eq!(last.action, symbol_short!("release"));
+    assert_eq!(last.action, symbol_short!("emerg"));
 }

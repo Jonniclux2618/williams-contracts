@@ -30,21 +30,23 @@ elif [[ -n "${1:-}" ]]; then
   exit 2
 fi
 
-version="$(cargo metadata --no-deps --format-version 1 \
-  | jq -r '.packages[] | select(.name=="will") | .version')"
+if command -v cargo >/dev/null 2>&1; then
+  version="$(cargo metadata --no-deps --format-version 1 \
+    | jq -r '.packages[] | select(.name=="will") | .version')"
+else
+  version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' contracts/will/Cargo.toml | head -n 1)"
+fi
 
 wasm_path="target/wasm32v1-none/release/will.wasm"
 out_path="spec/will-v${version}.json"
 stellar_bin="${STELLAR_BIN:-stellar}"
 
 echo "Building will contract (release, wasm32v1-none)..."
-cargo build -p will --release --target wasm32v1-none
+SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2=1 cargo build -p will --release --target wasm32v1-none
 
 if [[ "${check_mode}" -eq 0 ]]; then
   echo "Exporting spec to ${out_path}..."
-  "${stellar_bin}" contract bindings json \
-    --wasm "${wasm_path}" \
-    --output "${out_path}"
+  export_spec "${out_path}"
   echo "Done. Diff ${out_path} against the previous version to review drift."
   exit 0
 fi
@@ -63,9 +65,7 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 fresh_path="${tmp_dir}/will-v${version}.json"
 
 echo "Exporting current spec for comparison..."
-"${stellar_bin}" contract bindings json \
-  --wasm "${wasm_path}" \
-  --output "${fresh_path}"
+export_spec "${fresh_path}"
 
 # Compare parsed JSON rather than bytes, so formatting or key ordering from a
 # different stellar-cli build is not reported as a contract change.

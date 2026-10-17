@@ -274,10 +274,7 @@ fn test_get_time_until_deadline_pending_confirmation() {
 
     // Advance 1800 seconds
     env.ledger().with_mut(|l| l.timestamp += 1800);
-    assert_eq!(
-        client.get_time_until_deadline(&will_id),
-        Some(1800)
-    );
+    assert_eq!(client.get_time_until_deadline(&will_id), Some(1800));
 
     // Advance past the confirmation deadline (another 2000 seconds -> 200 seconds past due)
     env.ledger().with_mut(|l| l.timestamp += 2000);

@@ -214,7 +214,13 @@ fn authorized_redirect_without_a_record_fails() {
     client.retry_failed_payout(&will_id, &token_address, &beneficiary);
 
     assert_eq!(
-        client.try_redirect_failed_payout(&will_id, &token_address, &beneficiary, &recovery, &owner),
+        client.try_redirect_failed_payout(
+            &will_id,
+            &token_address,
+            &beneficiary,
+            &recovery,
+            &owner
+        ),
         Err(Ok(WillError::NoFailedPayout.into()))
     );
 }

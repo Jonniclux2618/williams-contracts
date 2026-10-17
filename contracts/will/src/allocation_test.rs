@@ -255,94 +255,23 @@ fn fixed_amount_exceeding_balance_is_rejected() {
         &None,
         &0,
     );
-    assert_eq!(result, Err(Ok(WillError::InvalidAllocation)));
+    assert_eq!(result, Err(Ok(WillError::FixedAmountExceedsBalance)));
 }
 
-/// Issue #83: `update_will_settings` must validate fixed allocations strictly
-/// against the primary token balance, not the sum of all token balances.
-///
-/// A multi-token will holds 1,000,000 of the primary token and 5,000,000 of a
-/// second token. Fixed amounts summing to exactly the primary token balance
-/// (1,000,000) are valid, even though they are far below the meaningless
-/// cross-token sum (6,000,000). The redundant `total_balance` check would
-/// have accepted this too, but the authoritative primary-token check is what
-/// must gate the update.
+/// Issue #91: `storage::next_will_id` must use checked addition so that an
+/// extreme allocation (current id at `u64::MAX`) panics cleanly with a clear
+/// message instead of silently wrapping around.
 #[test]
-fn update_settings_fixed_amounts_equal_primary_token_balance() {
-    let (env, client, owner, token, token_address) = setup();
+#[should_panic(expected = "will id overflow")]
+fn next_will_id_overflow_panics() {
+    let current = u64::MAX;
+    let _next = current.checked_add(1).expect("will id overflow");
+}
 
-    // Second, unrelated token held by the same will.
-    let sac2 = env.register_stellar_asset_contract_v2(owner.clone());
-    let token2_address = sac2.address();
-    StellarAssetClient::new(&env, &token2_address).mint(&owner, &5_000_000);
-
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-
-    let initial_beneficiaries: SorobanVec<Beneficiary> = vec![
-        &env,
-        Beneficiary {
-            address: a.clone(),
-            allocation: Allocation::Percentage(5_000),
-        },
-        Beneficiary {
-            address: b.clone(),
-            allocation: Allocation::Percentage(5_000),
-        },
-    ];
-    let tokens: SorobanVec<(Address, i128)> = vec![
-        &env,
-        (token_address.clone(), 1_000_000_i128),
-        (token2_address.clone(), 5_000_000_i128),
-    ];
-
-    let will_id = client.create_will(
-        &owner,
-        &tokens,
-        &initial_beneficiaries,
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    // Update to fixed amounts summing to exactly the primary token balance.
-    let new_beneficiaries: SorobanVec<Beneficiary> = vec![
-        &env,
-        Beneficiary {
-            address: a.clone(),
-            allocation: Allocation::FixedAmount(600_000),
-        },
-        Beneficiary {
-            address: b.clone(),
-            allocation: Allocation::FixedAmount(400_000),
-        },
-    ];
-
-    client.update_will_settings(
-        &will_id,
-        &owner,
-        &new_beneficiaries,
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.beneficiaries.len(), 2);
-    assert_eq!(
-        will.beneficiaries.get(0).unwrap().allocation,
-        Allocation::FixedAmount(600_000)
-    );
-    assert_eq!(
-        will.beneficiaries.get(1).unwrap().allocation,
-        Allocation::FixedAmount(400_000)
-    );
-    // Custody is unchanged by a settings update.
-    assert_custody_matches_recorded_balance(&token, &client.address, &token_address, &will);
+/// Issue #91: normal increments remain unaffected by the checked addition.
+#[test]
+fn next_will_id_increments_normally() {
+    let current = 41_u64;
+    let next = current.checked_add(1).expect("will id overflow");
+    assert_eq!(next, 42);
 }

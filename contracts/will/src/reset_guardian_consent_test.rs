@@ -75,8 +75,7 @@ fn test_reacceptance_flow_after_rejection() {
     let (env, client, owner, token_address, guardian_a, guardian_b) = setup();
 
     let guardians: SorobanVec<Address> = vec![&env, guardian_a.clone(), guardian_b.clone()];
-    let will_id =
-        create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 2);
+    let will_id = create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 2);
 
     let will = client.get_will(&will_id);
     let initial_updated_at = will.guardian_list_updated_at;
@@ -84,13 +83,21 @@ fn test_reacceptance_flow_after_rejection() {
     // Guardian A accepts
     client.accept_guardian_role(&will_id, &guardian_a);
     let will = client.get_will(&will_id);
-    let ga = will.guardians.iter().find(|g| g.address == guardian_a).unwrap();
+    let ga = will
+        .guardians
+        .iter()
+        .find(|g| g.address == guardian_a)
+        .unwrap();
     assert_eq!(ga.consent, GuardianConsent::Accepted);
 
     // Guardian B accidentally rejects
     client.reject_guardian_role(&will_id, &guardian_b);
     let will = client.get_will(&will_id);
-    let gb = will.guardians.iter().find(|g| g.address == guardian_b).unwrap();
+    let gb = will
+        .guardians
+        .iter()
+        .find(|g| g.address == guardian_b)
+        .unwrap();
     assert_eq!(gb.consent, GuardianConsent::Rejected);
 
     // Guardian B cannot directly re-accept: rejected is normally terminal
@@ -105,13 +112,21 @@ fn test_reacceptance_flow_after_rejection() {
 
     // Verify guardian B is now Pending and guardian A is still Accepted
     let will = client.get_will(&will_id);
-    let ga = will.guardians.iter().find(|g| g.address == guardian_a).unwrap();
+    let ga = will
+        .guardians
+        .iter()
+        .find(|g| g.address == guardian_a)
+        .unwrap();
     assert_eq!(
         ga.consent,
         GuardianConsent::Accepted,
         "Existing accepted guardians must retain consent"
     );
-    let gb = will.guardians.iter().find(|g| g.address == guardian_b).unwrap();
+    let gb = will
+        .guardians
+        .iter()
+        .find(|g| g.address == guardian_b)
+        .unwrap();
     assert_eq!(
         gb.consent,
         GuardianConsent::Pending,
@@ -127,7 +142,11 @@ fn test_reacceptance_flow_after_rejection() {
     // Now Guardian B can successfully accept the role
     client.accept_guardian_role(&will_id, &guardian_b);
     let will = client.get_will(&will_id);
-    let gb = will.guardians.iter().find(|g| g.address == guardian_b).unwrap();
+    let gb = will
+        .guardians
+        .iter()
+        .find(|g| g.address == guardian_b)
+        .unwrap();
     assert_eq!(gb.consent, GuardianConsent::Accepted);
 
     // Advance past cooldown
@@ -147,8 +166,7 @@ fn test_reset_guardian_consent_not_guardian_panics() {
     let (env, client, owner, token_address, guardian_a, _guardian_b) = setup();
 
     let guardians: SorobanVec<Address> = vec![&env, guardian_a.clone()];
-    let will_id =
-        create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 1);
+    let will_id = create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 1);
 
     let stranger = Address::generate(&env);
     let err = client.try_reset_guardian_consent(&will_id, &stranger);
@@ -160,8 +178,7 @@ fn test_reset_guardian_consent_terminal_will_panics() {
     let (env, client, owner, token_address, guardian_a, _guardian_b) = setup();
 
     let guardians: SorobanVec<Address> = vec![&env, guardian_a.clone()];
-    let will_id =
-        create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 1);
+    let will_id = create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 1);
 
     // Cancel the will
     client.cancel_will(&will_id, &owner);
@@ -175,8 +192,7 @@ fn test_reset_guardian_consent_noop_when_not_rejected() {
     let (env, client, owner, token_address, guardian_a, _guardian_b) = setup();
 
     let guardians: SorobanVec<Address> = vec![&env, guardian_a.clone()];
-    let will_id =
-        create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 1);
+    let will_id = create_will_with_guardians(&env, &client, &owner, &token_address, &guardians, 1);
 
     // Guardian is Pending: reset_guardian_consent is a no-op
     client.reset_guardian_consent(&will_id, &guardian_a);
