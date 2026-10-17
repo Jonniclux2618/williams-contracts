@@ -437,3 +437,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-67 -->
 - #67: update_guardians_weighted Permits Assigning Zero Weight to Guardians
+
+<!-- handsoff-issue-68 -->
+- #68: Guardian Consent Status Survives Unchecked Across Guardian Weight Updates
