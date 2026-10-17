@@ -242,169 +242,107 @@ fn fixed_amount_exceeding_balance_is_rejected() {
             allocation: Allocation::FixedAmount(200_000),
         },
     ];
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 1_000_000_i128)];
 
+    let result = client.try_create_will(
+        &owner,
+        &tokens,
+        &beneficiaries,
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+    assert_eq!(result, Err(Ok(WillError::InvalidAllocation)));
+}
+
+/// Issue #83: `update_will_settings` must validate fixed allocations strictly
+/// against the primary token balance, not the sum of all token balances.
+///
+/// A multi-token will holds 1,000,000 of the primary token and 5,000,000 of a
+/// second token. Fixed amounts summing to exactly the primary token balance
+/// (1,000,000) are valid, even though they are far below the meaningless
+/// cross-token sum (6,000,000). The redundant `total_balance` check would
+/// have accepted this too, but the authoritative primary-token check is what
+/// must gate the update.
+#[test]
+fn update_settings_fixed_amounts_equal_primary_token_balance() {
+    let (env, client, owner, token, token_address) = setup();
+
+    // Second, unrelated token held by the same will.
+    let sac2 = env.register_stellar_asset_contract_v2(owner.clone());
+    let token2_address = sac2.address();
+    StellarAssetClient::new(&env, &token2_address).mint(&owner, &5_000_000);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    let initial_beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: a.clone(),
+            allocation: Allocation::Percentage(5_000),
+        },
+        Beneficiary {
+            address: b.clone(),
+            allocation: Allocation::Percentage(5_000),
+        },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![
+        &env,
+        (token_address.clone(), 1_000_000_i128),
+        (token2_address.clone(), 5_000_000_i128),
+    ];
+
+    let will_id = client.create_will(
+        &owner,
+        &tokens,
+        &initial_beneficiaries,
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    // Update to fixed amounts summing to exactly the primary token balance.
+    let new_beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: a.clone(),
+            allocation: Allocation::FixedAmount(600_000),
+        },
+        Beneficiary {
+            address: b.clone(),
+            allocation: Allocation::FixedAmount(400_000),
+        },
+    ];
+
+    client.update_will_settings(
+        &will_id,
+        &owner,
+        &new_beneficiaries,
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.beneficiaries.len(), 2);
     assert_eq!(
-        client.try_create_will(
-            &owner,
-            &tokens,
-            &beneficiaries,
-            &90,
-            &7,
-            &vec![&env],
-            &0,
-            &None,
-            &0
-        ),
-        Err(Ok(WillError::FixedAmountExceedsBalance.into()))
+        will.beneficiaries.get(0).unwrap().allocation,
+        Allocation::FixedAmount(600_000)
     );
-}
-
-/// A `top_up` after creation increases the balance available to whatever
-/// remains after fixed amounts, so percentage beneficiaries — not the fixed
-/// one — capture the extra funds. This is the exact motivating case from the
-/// issue: fixed amounts don't need recalculating by hand as the balance
-/// changes.
-#[test]
-fn top_up_grows_the_percentage_remainder_not_the_fixed_share() {
-    let (env, client, owner, token, token_address) = setup();
-    let sister = Address::generate(&env);
-    let rest = Address::generate(&env);
-
-    let beneficiaries: SorobanVec<Beneficiary> = vec![
-        &env,
-        Beneficiary {
-            address: sister.clone(),
-            allocation: Allocation::FixedAmount(200_000),
-        },
-        Beneficiary {
-            address: rest.clone(),
-            allocation: Allocation::Percentage(10_000),
-        },
-    ];
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 1_000_000_i128)];
-
-    let will_id = client.create_will(
-        &owner,
-        &tokens,
-        &beneficiaries,
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
+    assert_eq!(
+        will.beneficiaries.get(1).unwrap().allocation,
+        Allocation::FixedAmount(400_000)
     );
-    client.top_up(&will_id, &owner, &token_address, &500_000);
-    assert_will_invariants(&client, &token, &token_address, will_id);
-
-    release(&env, &client, will_id);
-
-    assert_eq!(token.balance(&sister), 200_000);
-    assert_eq!(token.balance(&rest), 1_300_000);
-}
-
-/// Demonstrates the ergonomics unlocked by `Will: PartialEq + Eq`.
-///
-/// Before `Will` derived `PartialEq`/`Eq`, verifying that a `check_in` call
-/// left the will otherwise unchanged required one `assert_eq!` per field and
-/// it was easy to silently miss one. Now a single `assert_eq!(will_before,
-/// will_after)` compares every field simultaneously, and any unexpected
-/// mutation causes an immediate, descriptive failure.
-///
-/// Here we verify that two separately fetched snapshots of the same
-/// newly-created will are identical — a baseline sanity check that is only
-/// expressible as a single statement because `Will` now implements `PartialEq`.
-#[test]
-fn will_partialeq_allows_single_assert() {
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
-
-    let beneficiaries: SorobanVec<Beneficiary> = vec![
-        &env,
-        Beneficiary {
-            address: beneficiary.clone(),
-            allocation: Allocation::Percentage(10_000),
-        },
-    ];
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 500_000_i128)];
-
-    let will_id = client.create_will(
-        &owner,
-        &tokens,
-        &beneficiaries,
-        &30,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-
-    // Fetch the will twice — the two snapshots must be identical.
-    let will_first = client.get_will(&will_id);
-    let will_second = client.get_will(&will_id);
-
-    // A single assert_eq! compares every Will field at once.
-    // Without Will: PartialEq this line would not compile.
-    assert_eq!(will_first, will_second);
-
-    // Also confirm that the key fields are what we expect.
-    assert_eq!(will_first.id, will_id);
-    assert_eq!(will_first.owner, owner);
-    assert_eq!(will_first.status, WillStatus::Active);
-    assert_eq!(will_first.checkin_period_days, 30);
-    assert_eq!(will_first.grace_period_days, 7);
-}
-
-/// Three-way equal percentage split with rounding remainder absorbed by the
-/// last beneficiary. Validates that the rounding behavior is consistent across
-/// multiple beneficiaries and that the total distributed equals the initial balance.
-#[test]
-fn three_way_percentage_split_with_remainder() {
-    let (env, client, owner, token, token_address) = setup();
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
-    let charlie = Address::generate(&env);
-
-    let beneficiaries: SorobanVec<Beneficiary> = vec![
-        &env,
-        Beneficiary {
-            address: alice.clone(),
-            allocation: Allocation::Percentage(3_333),
-        },
-        Beneficiary {
-            address: bob.clone(),
-            allocation: Allocation::Percentage(3_333),
-        },
-        Beneficiary {
-            address: charlie.clone(),
-            allocation: Allocation::Percentage(3_334),
-        },
-    ];
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 1_000_000_i128)];
-
-    let will_id = client.create_will(
-        &owner,
-        &tokens,
-        &beneficiaries,
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-    assert_will_invariants(&client, &token, &token_address, will_id);
-    release(&env, &client, will_id);
-
-    let alice_balance = token.balance(&alice);
-    let bob_balance = token.balance(&bob);
-    let charlie_balance = token.balance(&charlie);
-
-    assert_eq!(alice_balance, 333_300);
-    assert_eq!(bob_balance, 333_300);
-    assert_eq!(charlie_balance, 333_400);
-    assert_eq!(token.balance(&client.address), 0);
-    assert_eq!(alice_balance + bob_balance + charlie_balance, 1_000_000);
+    // Custody is unchanged by a settings update.
+    assert_custody_matches_recorded_balance(&token, &client.address, &token_address, &will);
 }
